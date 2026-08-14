@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import yt_dlp
 import os
+import shutil
 import logging
 import requests
 
@@ -8,6 +9,23 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+def setup_cookies():
+    """نسخ ملف الكوكيز إلى مجلد /tmp القابل للكتابة لتفادي خطأ Read-only system"""
+    secret_cookies = '/etc/secrets/cookies.txt'
+    tmp_cookies = '/tmp/cookies.txt'
+    
+    if os.path.exists(secret_cookies):
+        try:
+            shutil.copy(secret_cookies, tmp_cookies)
+            logger.info("Successfully copied cookies to /tmp/cookies.txt")
+            return tmp_cookies
+        except Exception as e:
+            logger.error(f"Failed to copy cookies: {e}")
+            return secret_cookies
+    elif os.path.exists('cookies.txt'):
+        return 'cookies.txt'
+    return None
 
 def get_best_format(formats, mode):
     try:
@@ -17,13 +35,13 @@ def get_best_format(formats, mode):
                 audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                 return audio_formats[0].get('url')
         else:
-            # 1. البحث أولاً عن فيديو يحتوي على صوت وفيديو معاً
+            # 1. البحث عن صيغة تحتوي فيديو وصوت
             complete_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and f.get('url')]
             if complete_formats:
                 complete_formats.sort(key=lambda x: x.get('height', 0) or 0, reverse=True)
                 return complete_formats[0].get('url')
             
-            # 2. في حال عدم وجود صيغة مدمجة، اختيار أفضل فيديو متاح له رابط مباشر
+            # 2. أي صيغة فيديو متاحة
             video_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('url')]
             if video_formats:
                 video_formats.sort(key=lambda x: x.get('height', 0) or 0, reverse=True)
@@ -44,10 +62,12 @@ def get_download_link():
     if not url:
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
 
-    if 'pin.it' in url:
+    # فك روابط Pinterest المختصرة
+    if 'pin.it' in url or 'pinterest' in url:
         try:
             response = requests.head(url, allow_redirects=True, timeout=5)
             url = response.url
+            logger.info(f"Resolved Pinterest URL: {url}")
         except Exception as e:
             logger.error(f"Failed to resolve shortlink: {e}")
 
@@ -58,7 +78,6 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        'format': 'b/best',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -71,13 +90,10 @@ def get_download_link():
         }
     }
 
-    # التحقق من وجود ملف الكوكيز في Render أو محلياً
-    if os.path.exists('/etc/secrets/cookies.txt'):
-        ydl_opts['cookiefile'] = '/etc/secrets/cookies.txt'
-        logger.info("Using Render Secret Cookies file.")
-    elif os.path.exists('cookies.txt'):
-        ydl_opts['cookiefile'] = 'cookies.txt'
-        logger.info("Using local cookies.txt file.")
+    # تجهيز الكوكيز في المسار المكتبي القابل للتعديل
+    cookie_file = setup_cookies()
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -108,7 +124,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.3'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.4'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
