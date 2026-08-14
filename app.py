@@ -28,9 +28,12 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط فيديو حقيقي مع استبعاد تام للصور، الـ storyboards، والصور المصغرة"""
+    """استخراج رابط فيديو حقيقي وصالح 100% مع منع إرجاع الصور أو الثامبنيل نهائياً"""
     formats = info.get('formats', [])
     
+    if not formats:
+        return None
+
     valid_formats = []
     for f in formats:
         u = f.get('url')
@@ -44,16 +47,19 @@ def extract_clean_url(info, mode):
         vcodec = str(f.get('vcodec', 'none')).lower()
         acodec = str(f.get('acodec', 'none')).lower()
         
-        # استبعاد تام للقصص المصغرة (storyboards / sb) والصور والـ m3u8
+        # استبعاد تام للصور، الـ storyboards، الـ thumbnails، و m3u8
         if format_id.startswith('sb') or 'storyboard' in format_id or 'storyboard' in format_note:
             continue
         if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u:
             continue
-        if ext in ['jpg', 'jpeg', 'png', 'webp', 'mhtml', 'gif']:
+        if ext in ['jpg', 'jpeg', 'png', 'webp', 'mhtml', 'gif', 'heic']:
             continue
         if any(img_codec in vcodec for img_codec in ['mjpeg', 'webp', 'jpeg', 'jpg', 'png', 'image']):
             continue
-            
+        # إذا كان الفيديو والصوت معاً معدومين، فهذا يعني أنه ملف صورة وليس وسائط
+        if vcodec in ['none', 'null', ''] and acodec in ['none', 'null', '']:
+            continue
+
         has_v = vcodec not in ['none', 'null', '']
         has_a = acodec not in ['none', 'null', '']
         height = f.get('height', 0) or 0
@@ -78,22 +84,20 @@ def extract_clean_url(info, mode):
             any_audio.sort(key=lambda x: x['abr'], reverse=True)
             return any_audio[0]['url']
     else:
-        # البحث عن فيديو مدمج بصوت وصورة (Progressive MP4/WebM)
+        # البحث عن فيديو مدمج بصوت وصورة
         combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
         if combo:
             combo.sort(key=lambda x: (x['ext'] == 'mp4', x['height']), reverse=True)
             return combo[0]['url']
             
+        # البحث عن أي فيديو صالح
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
             video_only.sort(key=lambda x: x['height'], reverse=True)
             return video_only[0]['url']
 
-    main_url = info.get('url')
-    if main_url and not any(ext in main_url.lower() for ext in ['.jpg', '.png', '.webp', '.jpeg']):
-        return main_url
-
-    return valid_formats[0]['url'] if valid_formats else main_url
+    # منع إرجاع info.get('url') نهائياً لأنه غالباً يكون رابط الصورة/الثامبنيل
+    return valid_formats[0]['url'] if valid_formats else None
 
 @app.route('/download', methods=['GET'])
 def get_download_link():
@@ -119,8 +123,7 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        # تم تصحيح الخيار من 'all' إلى جلب أفضل فيديو مباشر لتفادي روابط الصور
-        'format': 'best[ext=mp4]/best' if mode == 'video' else 'bestaudio/best',
+        'format': 'all',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -153,7 +156,7 @@ def get_download_link():
                     'title': title
                 })
             else:
-                return jsonify({'status': 'error', 'message': 'No valid playable link found'}), 500
+                return jsonify({'status': 'error', 'message': 'No valid playable video link found'}), 500
 
     except Exception as e:
         logger.error(f"Extraction error: {str(e)}")
@@ -161,7 +164,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.1'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.8'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
