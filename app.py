@@ -28,7 +28,7 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط فيديو حقيقي 100% مع استبعاد تام للصور، الـ storyboards، والصور المصغرة"""
+    """استخراج رابط فيديو حقيقي مع استبعاد تام للصور، الـ storyboards، والصور المصغرة"""
     formats = info.get('formats', [])
     
     valid_formats = []
@@ -44,14 +44,13 @@ def extract_clean_url(info, mode):
         vcodec = str(f.get('vcodec', 'none')).lower()
         acodec = str(f.get('acodec', 'none')).lower()
         
-        # 1. استبعاد تام للقصص المصغرة (storyboards / sb) والصور والـ m3u8
+        # استبعاد تام للقصص المصغرة (storyboards / sb) والصور والـ m3u8
         if format_id.startswith('sb') or 'storyboard' in format_id or 'storyboard' in format_note:
             continue
         if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u:
             continue
         if ext in ['jpg', 'jpeg', 'png', 'webp', 'mhtml', 'gif']:
             continue
-        # استبعاد ترميز الصور مثل mjpeg أو webp في الـ vcodec
         if any(img_codec in vcodec for img_codec in ['mjpeg', 'webp', 'jpeg', 'jpg', 'png', 'image']):
             continue
             
@@ -70,7 +69,6 @@ def extract_clean_url(info, mode):
         })
 
     if mode == 'audio':
-        # البحث عن ملف صوتي نقي
         audio_only = [f for f in valid_formats if f['has_a'] and not f['has_v']]
         if audio_only:
             audio_only.sort(key=lambda x: x['abr'], reverse=True)
@@ -80,19 +78,17 @@ def extract_clean_url(info, mode):
             any_audio.sort(key=lambda x: x['abr'], reverse=True)
             return any_audio[0]['url']
     else:
-        # 1. البحث عن فيديو مدمج بصوت وصورة (Progressive MP4/WebM)
+        # البحث عن فيديو مدمج بصوت وصورة (Progressive MP4/WebM)
         combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
         if combo:
             combo.sort(key=lambda x: (x['ext'] == 'mp4', x['height']), reverse=True)
             return combo[0]['url']
             
-        # 2. البحث عن أي فيديو صالح يحتوي على vcodec حقيقي
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
             video_only.sort(key=lambda x: x['height'], reverse=True)
             return video_only[0]['url']
 
-    # إذا لم نجد في الـ formats، نتحقق أن الرابط الرئيسي ليس صورة
     main_url = info.get('url')
     if main_url and not any(ext in main_url.lower() for ext in ['.jpg', '.png', '.webp', '.jpeg']):
         return main_url
@@ -123,7 +119,7 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        # تم تصحيح الخيار لمنع جلب رابط الصورة المصغرة وجلب فيديو مباشر
+        # تم تصحيح الخيار من 'all' إلى جلب أفضل فيديو مباشر لتفادي روابط الصور
         'format': 'best[ext=mp4]/best' if mode == 'video' else 'bestaudio/best',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -131,7 +127,7 @@ def get_download_link():
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['mweb', 'web', 'android'],
+                'player_client': ['mweb', 'tv_embedded', 'ios', 'android'],
                 'skip': ['webpage', 'configs']
             }
         }
@@ -165,7 +161,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.8'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.1'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
