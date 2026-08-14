@@ -28,7 +28,7 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط مباشر وصالح للتحميل مع تفادي روابط البث m3u8"""
+    """استخراج أفضل رابط مباشر وصالح للتحميل مع استبعاد m3u8"""
     main_url = info.get('url')
     formats = info.get('formats', [])
     
@@ -42,42 +42,46 @@ def extract_clean_url(info, mode):
             continue
             
         protocol = f.get('protocol', '')
-        # استبعاد روابط البث الحية/m3u8 لأن Android DownloadManager لا يقبلها كملف فيديو
+        # استبعاد روابط m3u8 المخصصة للبث المباشر
         if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u:
             continue
             
         vcodec = f.get('vcodec', 'none')
         acodec = f.get('acodec', 'none')
         height = f.get('height', 0) or 0
+        abr = f.get('abr', 0) or 0
         
         valid_formats.append({
             'url': u,
             'has_v': vcodec != 'none',
             'has_a': acodec != 'none',
-            'height': height
+            'height': height,
+            'abr': abr
         })
 
     if mode == 'audio':
+        # 1. البحث عن صوت فقط
         audio_only = [f for f in valid_formats if f['has_a'] and not f['has_v']]
         if audio_only:
+            audio_only.sort(key=lambda x: x['abr'], reverse=True)
             return audio_only[0]['url']
+        # 2. أي مسار يحتوي على صوت
         any_audio = [f for f in valid_formats if f['has_a']]
         if any_audio:
             return any_audio[0]['url']
     else:
-        # 1. البحث عن صيغة تجمع الصوت والفيديو معاً
+        # 1. البحث عن فيديو مدمج بصوت وصورة (Progressive MP4)
         combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
         if combo:
             combo.sort(key=lambda x: x['height'], reverse=True)
             return combo[0]['url']
             
-        # 2. أي فيديو صالح متاح
+        # 2. البحث عن أي فيديو صالح
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
             video_only.sort(key=lambda x: x['height'], reverse=True)
             return video_only[0]['url']
 
-    # في حال عدم التمكن من التصفية، استخدام الرابط الأساسي إذا لم يكن m3u8
     if main_url and '.m3u8' not in main_url:
         return main_url
 
@@ -107,14 +111,15 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        # عدم إجبار 'format' هنا لمنع حدوث خطأ Format not available في Pinterest
+        # هذا الخيار يمنع خطأ 'Requested format is not available' كلياً
+        'format': 'all',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['tv_embedded', 'android', 'ios', 'mweb'],
+                'player_client': ['mweb', 'tv_embedded', 'ios', 'android'],
                 'skip': ['webpage', 'configs']
             }
         }
@@ -148,7 +153,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.6'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.7'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
