@@ -1,4 +1,5 @@
 Flask==3.0.3
-yt-dlp>=2024.00.00
+yt-dlp>=2024.3.1
 requests==2.31.0
 gunicorn==21.2.0
+
