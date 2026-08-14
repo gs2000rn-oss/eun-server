@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import yt_dlp
 import os
 import logging
+import requests # تمت الإضافة لمعالجة روابط Pinterest المختصرة
 
 # إعداد السجلات لمتابعة أي خطأ بدقة على لوحة تحكم Render
 logging.basicConfig(level=logging.INFO)
@@ -13,19 +14,16 @@ def get_best_format(formats, mode):
     """دالة ذكية لاختيار أفضل جودة فيديو أو صوت بدقة فائقة"""
     try:
         if mode == 'audio':
-            # تصفية الصيغ الصوتية الخالصة وترتيبها حسب الجودة
             audio_formats = [f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
             if audio_formats:
                 audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
                 return audio_formats[0].get('url')
         else:
-            # تصفية الصيغ التي تحتوي على فيديو وصوت معاً وبجودة عالية
             complete_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
             if complete_formats:
                 complete_formats.sort(key=lambda x: x.get('height', 0) or 0, reverse=True)
                 return complete_formats[0].get('url')
             
-            # حل بديل في حال لم تتوفر صيغة مدمجة
             video_formats = [f for f in formats if f.get('url')]
             if video_formats:
                 return video_formats[-1].get('url')
@@ -42,6 +40,16 @@ def get_download_link():
         logger.warning("Request received without URL.")
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
 
+    # معالجة الروابط المختصرة (خاصة بـ Pinterest)
+    if 'pin.it' in url:
+        try:
+            # فك الرابط المختصر للحصول على الرابط الكامل
+            response = requests.head(url, allow_redirects=True, timeout=5)
+            url = response.url
+            logger.info(f"Resolved shortlink to: {url}")
+        except Exception as e:
+            logger.error(f"Failed to resolve shortlink: {e}")
+
     logger.info(f"Processing URL: {url} | Mode: {mode}")
 
     # إعدادات yt-dlp المتقدمة والمحاكية لمتصفح حقيقي لتجاوز الحظر
@@ -51,15 +59,17 @@ def get_download_link():
         'noplaylist': True,
         'extract_flat': False,
         'format': 'best',
+        # السطر التالي هو الحل الجذري لمشكلة يوتيوب، تأكد من توفير الملف في Render
+        'cookiefile': 'cookies.txt', 
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Referer': 'https://www.google.com/'
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web']
+                'player_client': ['android', 'web', 'ios'] # تمت إضافة ios لتوسيع خيارات التخطي
             }
         }
     }
@@ -104,7 +114,7 @@ def home():
     return jsonify({
         'status': 'online',
         'service': 'Shark Downloader Advanced Engine',
-        'version': '3.0'
+        'version': '3.1'
     })
 
 if __name__ == '__main__':
