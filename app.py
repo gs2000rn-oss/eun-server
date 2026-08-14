@@ -28,7 +28,7 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط MP4 مباشر حقيقي واستبعاد فيديوهات المعاينة (Storyboard) و m3u8"""
+    """استخراج أفضل رابط مباشر وصالح للتحميل مع تصفية جيدة وتجنب أخطاء الصيغ"""
     formats = info.get('formats', [])
     main_url = info.get('url')
     
@@ -46,11 +46,9 @@ def extract_clean_url(info, mode):
         format_note = str(f.get('format_note', '')).lower()
         ext = str(f.get('ext', '')).lower()
         
-        # 1. استبعاد صيغ المعاينة المصغرة (Storyboard) التي تسبب مشكلة الفيديو ذو الثانية الواحدة
+        # استبعاد معاينات Storyboard والروابط الحية m3u8
         if 'storyboard' in format_note or 'sb' in format_id or 'storyboard' in format_id:
             continue
-            
-        # 2. استبعاد روابط البث الحية m3u8 و manifest
         if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u or ext == 'm3u8':
             continue
             
@@ -60,14 +58,13 @@ def extract_clean_url(info, mode):
         width = f.get('width', 0) or 0
         abr = f.get('abr', 0) or 0
         
-        # استبعاد الصور المصغرة القزمية
         if height > 0 and height < 140 and width < 140:
             continue
 
         valid_formats.append({
             'url': u,
-            'has_v': vcodec != 'none',
-            'has_a': acodec != 'none',
+            'has_v': vcodec != 'none' and vcodec is not None,
+            'has_a': acodec != 'none' and acodec is not None,
             'height': height,
             'abr': abr,
             'ext': ext
@@ -81,19 +78,16 @@ def extract_clean_url(info, mode):
             return audio_only[0]['url']
         any_audio = [f for f in valid_formats if f['has_a']]
         if any_audio:
+            any_audio.sort(key=lambda x: x['abr'], reverse=True)
             return any_audio[0]['url']
     else:
-        # 1. البحث عن فيديو مدمج بصوت وصورة معاً (Progressive MP4)
+        # 1. البحث أولاً عن فيديو يحتوي على صوت وصورة معاً (Progressive Stream)
         combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
         if combo:
-            mp4_combo = [f for f in combo if f['ext'] == 'mp4']
-            if mp4_combo:
-                mp4_combo.sort(key=lambda x: x['height'], reverse=True)
-                return mp4_combo[0]['url']
             combo.sort(key=lambda x: x['height'], reverse=True)
             return combo[0]['url']
             
-        # 2. البحث عن أي فيديو MP4 صالح
+        # 2. إذا لم يتوفر فيديو بصوت وصورة معاً، أخذ أفضل فيديو متاح
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
             video_only.sort(key=lambda x: x['height'], reverse=True)
@@ -123,19 +117,19 @@ def get_download_link():
 
     logger.info(f"Processing URL: {url} | Mode: {mode}")
 
+    # تم إزالة خيار 'format' نهائياً لمنع أي خطأ
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        'format': 'best[ext=mp4]/bestvideo+bestaudio/best',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb', 'tv_embedded'],
+                'player_client': ['ios', 'android', 'mweb'],
                 'skip': ['webpage', 'configs']
             }
         }
@@ -169,7 +163,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.8'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.9'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
