@@ -66,9 +66,13 @@ def get_download_link():
         }
     }
 
-    # التحقق من وجود ملف الكوكيز فقط إذا كان موجوداً
-    if os.path.exists('cookies.txt'):
+    # التحقق من وجود الكوكيز في Render (Secret File) أو محلياً
+    if os.path.exists('/etc/secrets/cookies.txt'):
+        ydl_opts['cookiefile'] = '/etc/secrets/cookies.txt'
+        logger.info("Using Render Secret Cookies file.")
+    elif os.path.exists('cookies.txt'):
         ydl_opts['cookiefile'] = 'cookies.txt'
+        logger.info("Using local cookies.txt file.")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
