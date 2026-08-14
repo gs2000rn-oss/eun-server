@@ -10,20 +10,16 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-def setup_cookies():
-    """نسخ ملف الكوكيز إلى مجلد /tmp القابل للكتابة"""
+def get_cookies_file():
     secret_cookies = '/etc/secrets/cookies.txt'
     tmp_cookies = '/tmp/cookies.txt'
-    
     if os.path.exists(secret_cookies):
         try:
             shutil.copy(secret_cookies, tmp_cookies)
-            logger.info("Successfully copied cookies to /tmp/cookies.txt")
             return tmp_cookies
-        except Exception as e:
-            logger.error(f"Failed to copy cookies: {e}")
-            return secret_cookies
-    elif os.path.exists('cookies.txt'):
+        except Exception:
+            pass
+    if os.path.exists('cookies.txt'):
         return 'cookies.txt'
     return None
 
@@ -35,113 +31,83 @@ def get_download_link():
     if not url:
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
 
-    # حل روابط التوجيه القصيرة مثل Pinterest
+    # حل روابط التوجيه القصيرة
     if 'pin.it' in url or 'pinterest' in url:
         try:
-            response = requests.head(url, allow_redirects=True, timeout=5)
-            url = response.url
-        except Exception as e:
-            logger.error(f"Failed to resolve shortlink: {e}")
+            res = requests.head(url, allow_redirects=True, timeout=5)
+            url = res.url
+        except Exception:
+            pass
 
     logger.info(f"Processing URL: {url} | Mode: {mode}")
+    cookie_path = get_cookies_file()
 
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web']
+    def try_extract(use_cookies):
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'noplaylist': True,
+            'format': 'best[ext=mp4]/best' if mode == 'video' else 'bestaudio/best',
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web', 'mweb']
+                }
             }
         }
-    }
-
-    cookie_file = setup_cookies()
-    if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
-
-    try:
+        if use_cookies and cookie_path and os.path.exists(cookie_path):
+            ydl_opts['cookiefile'] = cookie_path
+            
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                return jsonify({'status': 'error', 'message': 'Failed to extract media'}), 500
+            return ydl.extract_info(url, download=False)
 
-            title = info.get('title', 'Downloaded_Media')
-            formats = info.get('formats', [])
-            
-            download_url = None
-            
-            if mode == 'audio':
-                audio_formats = []
-                for f in formats:
-                    u = f.get('url')
-                    acodec = str(f.get('acodec', '')).lower()
-                    if u and acodec and acodec != 'none':
-                        audio_formats.append(f)
-                if audio_formats:
-                    audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
-                    download_url = audio_formats[0].get('url')
-            else:
-                # تصفية واختيار أفضل جودة فيديو واضحة مع صوتها لتجنب التشويش والصور
-                valid_videos = []
-                for f in formats:
-                    u = f.get('url')
-                    if not u:
-                        continue
-                    format_id = str(f.get('format_id', '')).lower()
-                    format_note = str(f.get('format_note', '')).lower()
-                    vcodec = str(f.get('vcodec', '')).lower()
-                    acodec = str(f.get('acodec', '')).lower()
-                    ext = str(f.get('ext', '')).lower()
-                    
-                    # استبعاد تام لصور المعاينة والقصص المصغرة
-                    if format_id.startswith('sb') or 'storyboard' in format_id or 'storyboard' in format_note:
-                        continue
-                    if ext in ['jpg', 'jpeg', 'png', 'webp', 'mhtml', 'gif']:
-                        continue
-                    if any(img in vcodec for img in ['jpeg', 'mjpeg', 'jpg', 'webp', 'images']):
-                        continue
-                    if vcodec in ['none', 'null', '']:
-                        continue
-                    
-                    has_audio = acodec not in ['none', 'null', ''] and acodec is not None
-                    height = f.get('height', 0) or 0
-                    
-                    valid_videos.append({
-                        'url': u,
-                        'height': height,
-                        'has_audio': has_audio,
-                        'ext': ext
-                    })
-                
-                if valid_videos:
-                    # الترتيب بحيث يتم اختيار أعلى دقة متوفرة مع صوت واضح
-                    valid_videos.sort(key=lambda x: (x['has_audio'], x['height']), reverse=True)
-                    download_url = valid_videos[0]['url']
-
-            if not download_url:
-                download_url = info.get('url')
-
-            if download_url:
-                return jsonify({
-                    'status': 'success',
-                    'url': download_url,
-                    'title': title
-                })
-            else:
-                return jsonify({'status': 'error', 'message': 'No valid media link found'}), 500
-
+    info = None
+    # محاولة الاستخراج مع الكوكيز، وإن فشلت، يتم السحب تلقائياً بدونها لتفادي التوقف التام
+    try:
+        if cookie_path:
+            try:
+                info = try_extract(True)
+            except Exception as e:
+                logger.warning(f"Cookies extraction failed, retrying without cookies: {e}")
+                info = try_extract(False)
+        else:
+            info = try_extract(False)
     except Exception as e:
-        logger.error(f"Extraction error: {str(e)}")
+        logger.error(f"All extraction attempts failed: {e}")
         return jsonify({'status': 'error', 'message': f"Extraction failed: {str(e)}"}), 500
+
+    if not info:
+        return jsonify({'status': 'error', 'message': 'No info returned'}), 500
+
+    title = info.get('title', 'Downloaded_Media')
+    download_url = info.get('url')
+
+    # تصفية الصيغ واستبعاد الـ Storyboards تماماً في حال عدم وجود الرابط المباشر
+    if not download_url and 'formats' in info:
+        for f in info['formats']:
+            f_url = f.get('url')
+            f_id = str(f.get('format_id', '')).lower()
+            vcodec = str(f.get('vcodec', '')).lower()
+            
+            if f_id.startswith('sb') or 'storyboard' in f_id:
+                continue
+            if vcodec in ['none', 'null', '']:
+                continue
+            if f_url:
+                download_url = f_url
+                break
+
+    if download_url:
+        return jsonify({
+            'status': 'success',
+            'url': download_url,
+            'title': title
+        })
+    else:
+        return jsonify({'status': 'error', 'message': 'No valid media link found'}), 500
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.7'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '5.0'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
