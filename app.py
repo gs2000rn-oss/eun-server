@@ -1,139 +1,113 @@
-import os
-import tempfile
-import shutil
-from pathlib import Path
-from flask import Flask, request, send_file, jsonify, render_template_string
+from flask import Flask, request, jsonify
 import yt_dlp
+import os
+import shutil
+import logging
+import requests
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# مسار cookies.txt من Render Secret Files
-COOKIES_PATHS = [
-    "/etc/secrets/cookies.txt",  # المسار الرسمي في Render
-    "./cookies.txt",             # للاختبار المحلي
-    "cookies.txt",
-]
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
 
-def get_cookies_path():
-    for path in COOKIES_PATHS:
-        if os.path.exists(path):
-            return path
-    return None
+def resolve_url_if_needed(url):
+    """فك توجيه روابط pin.it فقط دون المساس بروابط يوتيوب"""
+    if 'pin.it' in url or 'pinterest.com' in url:
+        try:
+            res = requests.get(url, allow_redirects=True, timeout=5, headers={'User-Agent': USER_AGENT})
+            return res.url
+        except Exception as e:
+            logger.error(f"Pinterest resolve error: {e}")
+    return url
 
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>تحميل فيديوهات يوتيوب</title>
-    <style>
-        * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, sans-serif; }
-        body { background: #0f0f0f; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-        .container { background: #1a1a1a; padding: 2rem; border-radius: 16px; width: 100%; max-width: 500px; box-shadow: 0 10px 40px rgba(0,0,0,0.5); }
-        h1 { text-align: center; color: #ff0000; margin-bottom: 1.5rem; }
-        input[type="url"] { width: 100%; padding: 12px 16px; border: 2px solid #333; border-radius: 8px; background: #111; color: #fff; font-size: 16px; margin-bottom: 1rem; }
-        input[type="url"]:focus { outline: none; border-color: #ff0000; }
-        button { width: 100%; padding: 14px; background: #ff0000; color: white; border: none; border-radius: 8px; font-size: 18px; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        button:hover { background: #cc0000; }
-        button:disabled { background: #555; cursor: not-allowed; }
-        .info { margin-top: 1rem; font-size: 14px; color: #aaa; text-align: center; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>⬇️ تحميل من يوتيوب</h1>
-        <form id="dlForm" method="POST" action="/download">
-            <input type="url" name="url" id="url" placeholder="الصق رابط فيديو يوتيوب هنا..." required>
-            <button type="submit" id="btn">تحميل الفيديو</button>
-        </form>
-        <div class="info">
-            يستخدم cookies.txt من Secret Files على Render<br>
-            الجودة الأفضل (MP4)
-        </div>
-    </div>
-    <script>
-        document.getElementById('dlForm').addEventListener('submit', function() {
-            document.getElementById('btn').disabled = true;
-            document.getElementById('btn').textContent = 'جاري التحميل... انتظر';
-        });
-    </script>
-</body>
-</html>
-"""
-
-
-@app.route("/")
-def index():
-    return render_template_string(HTML_TEMPLATE)
-
-
-@app.route("/download", methods=["POST"])
+@app.route('/download', methods=['GET'])
 def download():
-    url = request.form.get("url") or (request.json.get("url") if request.is_json else None)
-    
-    if not url:
-        return jsonify({"error": "الرجاء إدخال رابط يوتيوب"}), 400
+    raw_url = request.args.get('url')
+    mode = request.args.get('mode', 'video')
 
-    cookies = get_cookies_path()
-    if not cookies:
-        return jsonify({
-            "error": "ملف cookies.txt غير موجود. أضفه كـ Secret File باسم cookies.txt في Render"
-        }), 500
+    if not raw_url:
+        return jsonify({'status': 'error', 'message': 'No URL provided'}), 200
 
-    temp_dir = tempfile.mkdtemp()
-    
+    # 1. التمييز بين بينترست وباقي المواقع
+    target_url = resolve_url_if_needed(raw_url)
+    is_pinterest = 'pinterest' in target_url or 'pin.it' in raw_url
+
+    # 2. إعدادات عامة وآمنة لـ yt-dlp
     ydl_opts = {
-        "format": "bestvideo[ext=mp4][vcodec^=avc]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "outtmpl": os.path.join(temp_dir, "%(title).80s.%(ext)s"),
-        "cookiefile": cookies,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "restrictfilenames": True,
-        "merge_output_format": "mp4",
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'http_headers': {
+            'User-Agent': USER_AGENT
+        }
     }
+
+    # إضافة Referer فقط إذا كان الطلب لبينترست
+    if is_pinterest:
+        ydl_opts['http_headers']['Referer'] = 'https://www.pinterest.com/'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if not os.path.exists(filename):
-                files = list(Path(temp_dir).glob("*"))
-                if not files:
-                    raise Exception("لم يتم العثور على الملف بعد التحميل")
-                filename = str(files[0])
+            info = ydl.extract_info(target_url, download=False)
+            if not info:
+                return jsonify({'status': 'error', 'message': 'Failed to extract info'}), 200
 
-            safe_name = os.path.basename(filename)
-            
-            return send_file(
-                filename,
-                as_attachment=True,
-                download_name=safe_name,
-                mimetype="video/mp4"
-            )
+            title = info.get('title', 'Downloaded Video')
+            formats = info.get('formats', [])
+            download_url = None
+
+            if is_pinterest:
+                # --- معالجة خاصة لبينترست: البحث عن MP4 واستبعاد m3u8 ---
+                for f in reversed(formats):
+                    f_url = f.get('url', '')
+                    ext = f.get('ext', '')
+                    if (ext == 'mp4' or '.mp4' in f_url) and '.m3u8' not in f_url:
+                        download_url = f_url
+                        break
+                
+                if not download_url:
+                    main_url = info.get('url', '')
+                    if main_url and '.m3u8' not in main_url:
+                        download_url = main_url
+
+            else:
+                # --- معالجة يوتيوب وباقي المنصات ---
+                if mode == 'audio':
+                    audio_fmt = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+                    if audio_fmt:
+                        download_url = audio_fmt[-1].get('url')
+                else:
+                    # تصفية الفيديو لاستخراج فيديو + صوت مدمج
+                    prog_fmt = [
+                        f for f in formats 
+                        if f.get('vcodec') != 'none' and f.get('acodec') != 'none' and not f.get('url', '').endswith('.m3u8')
+                    ]
+                    if prog_fmt:
+                        prog_fmt.sort(key=lambda x: (x.get('height') or 0, x.get('tbr') or 0), reverse=True)
+                        download_url = prog_fmt[0].get('url')
+
+                if not download_url:
+                    download_url = info.get('url')
+
+                if not download_url and formats:
+                    download_url = formats[-1].get('url')
+
+            # 3. إرجاع النتيجة
+            if download_url:
+                return jsonify({
+                    'status': 'success',
+                    'url': download_url,
+                    'title': title
+                }), 200
+            else:
+                return jsonify({'status': 'error', 'message': 'No direct playable link found'}), 200
 
     except Exception as e:
-        return jsonify({"error": f"فشل التحميل: {str(e)}"}), 500
-    finally:
-        try:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        except:
-            pass
+        logger.error(f"Server Exception: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)}), 200
 
-
-@app.route("/health")
-def health():
-    cookies_ok = get_cookies_path() is not None
-    return jsonify({
-        "status": "ok",
-        "cookies_found": cookies_ok,
-        "cookies_path": get_cookies_path()
-    })
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
