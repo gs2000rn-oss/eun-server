@@ -45,11 +45,9 @@ def get_download_link():
 
     logger.info(f"Processing URL: {url} | Mode: {mode}")
 
-    # استخدام صيغ تضمن جلب فيديو حقيقي متكامل أو صوت مباشر دون الحاجة لـ ffmpeg أو تعقيد الدمج
     if mode == 'audio':
         format_string = 'bestaudio/best'
     else:
-        # نطلب أفضل صيغة فيديو تحتوي على صوت وصورة معاً لتجنب أي مشاكل في الـ Formats أو الصور المجمعة
         format_string = 'best[ext=mp4]/best'
 
     ydl_opts = {
@@ -79,16 +77,12 @@ def get_download_link():
                 return jsonify({'status': 'error', 'message': 'Failed to extract media'}), 500
 
             title = info.get('title', 'Downloaded_Media')
-            
-            # إذا كان الرابط الأساسي موجوداً ومتاحاً مباشرة
             download_url = info.get('url')
             
-            # إذا لم يتم العثور عليه، نبحث داخل الـ formats المتاحة عن رابط صالح تماماً
             if not download_url and 'formats' in info:
                 for f in info['formats']:
                     f_url = f.get('url')
                     f_id = str(f.get('format_id', '')).lower()
-                    # استبعاد تام لأي صور أو Storyboards
                     if f_id.startswith('sb') or 'storyboard' in f_id:
                         continue
                     if f_url:
@@ -110,8 +104,8 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.3'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.4'})
 
 if __name__ == '__main__':
-    port = int(os.environ.0.get('PORT', 10000)) if hasattr(os.environ, 'get') else 10000
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
