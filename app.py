@@ -5,6 +5,7 @@ import shutil
 import logging
 import tempfile
 import traceback
+import requests
 from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
@@ -19,10 +20,9 @@ def setup_cookies():
     if os.path.exists(secret):
         try:
             shutil.copy(secret, tmp)
-            logger.info("Cookies copied to /tmp")
             return tmp
         except Exception as e:
-            logger.error(f"Copy failed: {e}")
+            logger.error(f"Copy cookies error: {e}")
             return secret
     if os.path.exists('cookies.txt'):
         return 'cookies.txt'
@@ -33,15 +33,17 @@ def setup_cookies():
 def home():
     return jsonify({
         'status': 'online',
-        'version': '4.0-real-download',
-        'how_to_use': 'GET /download?url=YOUTUBE_LINK'
+        'service': 'Universal Media Downloader',
+        'version': '5.0-multi',
+        'supports': ['YouTube', 'TikTok', 'Instagram', 'Facebook', 'Twitter/X', 'Pinterest'],
+        'usage': 'GET /download?url=LINK'
     })
 
 
 @app.route('/health')
 def health():
     cookies = setup_cookies()
-    ok = cookies is not None and os.path.exists(cookies)
+    ok = bool(cookies and os.path.exists(cookies))
     size = os.path.getsize(cookies) if ok else 0
     first = ""
     if ok:
@@ -60,69 +62,93 @@ def health():
 
 @app.route('/download', methods=['GET', 'POST'])
 def download():
-    url = request.args.get('url') or request.form.get('url')
+    url = (
+        request.args.get('url') or 
+        request.form.get('url') or 
+        (request.json.get('url') if request.is_json else None)
+    )
+    
     if not url:
-        return jsonify({'status': 'error', 'message': 'أضف ?url=رابط_اليوتيوب'}), 400
+        return jsonify({'status': 'error', 'message': 'أضف الرابط: /download?url=رابط_الفيديو'}), 400
+
+    # فك الروابط المختصرة
+    try:
+        if any(x in url for x in ['pin.it', 'vm.tiktok.com', 'vt.tiktok.com', 'fb.watch', 't.co']):
+            r = requests.head(url, allow_redirects=True, timeout=10,
+                            headers={'User-Agent': 'Mozilla/5.0'})
+            url = r.url
+            logger.info(f"Resolved: {url}")
+    except:
+        pass
 
     cookie_file = setup_cookies()
-    if not cookie_file:
-        return jsonify({'status': 'error', 'message': 'cookies.txt مش موجود في Secret Files'}), 500
-
-    temp_dir = tempfile.mkdtemp(prefix='yt_')
+    temp_dir = tempfile.mkdtemp(prefix='dl_')
     
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4][height<=720]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': os.path.join(temp_dir, '%(title).50s.%(ext)s'),
-        'cookiefile': cookie_file,
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best',
+        'outtmpl': os.path.join(temp_dir, '%(title).55s.%(ext)s'),
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'restrictfilenames': True,
         'merge_output_format': 'mp4',
         'retries': 10,
+        'fragment_retries': 10,
+        'socket_timeout': 30,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9,ar;q=0.8',
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'web', 'mweb'],
+                'player_client': ['android', 'web', 'mweb', 'tv'],
             }
         },
     }
 
+    if cookie_file:
+        ydl_opts['cookiefile'] = cookie_file
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            
             filename = ydl.prepare_filename(info)
-
+            
             if not os.path.exists(filename):
-                files = list(Path(temp_dir).glob('*'))
+                files = [f for f in Path(temp_dir).glob('*') if f.is_file()]
                 if not files:
-                    raise Exception('ما تم تحميل أي ملف')
+                    raise Exception('ما نزل أي ملف')
                 filename = str(max(files, key=lambda p: p.stat().st_size))
 
             size_mb = os.path.getsize(filename) / (1024 * 1024)
-            logger.info(f"File ready: {size_mb:.1f} MB")
+            logger.info(f"Downloaded {size_mb:.2f} MB")
 
-            if size_mb < 0.1:
-                return jsonify({'status': 'error', 'message': 'الملف صغير جداً (صورة؟)'}), 500
+            if size_mb < 0.08:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'الملف صغير جداً ({size_mb:.2f} MB) — غالباً صورة'
+                }), 500
 
-            safe_name = "".join(c if c.isalnum() or c in '._- ' else '_' for c in os.path.basename(filename))[:60]
-            if not safe_name.endswith('.mp4'):
-                safe_name += '.mp4'
+            title = info.get('title') or 'video'
+            safe_name = "".join(c if c.isalnum() or c in ' ._-' else '_' for c in title)[:55].strip()
+            ext = Path(filename).suffix.lower() or '.mp4'
+            if ext not in ['.mp4', '.webm', '.mkv', '.m4a', '.mp3']:
+                ext = '.mp4'
+            download_name = safe_name + ext
 
             return send_file(
                 filename,
                 as_attachment=True,
-                download_name=safe_name,
-                mimetype='video/mp4'
+                download_name=download_name,
+                mimetype='video/mp4' if ext == '.mp4' else 'application/octet-stream'
             )
 
     except Exception as e:
         err = str(e)
         logger.error(err)
         if 'Sign in to confirm' in err or 'not a bot' in err.lower():
-            msg = 'YouTube رفض (Bot). أعد تصدير cookies.txt من نافذة خاصة + robots.txt'
+            msg = 'YouTube رفض (Bot). أعد تصدير cookies.txt'
         else:
             msg = err[:500]
         return jsonify({'status': 'error', 'message': msg}), 500
