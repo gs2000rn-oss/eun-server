@@ -28,7 +28,7 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط MP4 كامل وبصوت وصورة واستبعاد المعاينات و m3u8"""
+    """استخراج رابط فيديو MP4 حقيقي واستبعاد كافة صور mjpeg و storyboards"""
     formats = info.get('formats', [])
     main_url = info.get('url')
     
@@ -45,30 +45,29 @@ def extract_clean_url(info, mode):
         format_id = str(f.get('format_id', '')).lower()
         format_note = str(f.get('format_note', '')).lower()
         ext = str(f.get('ext', '')).lower()
-        
-        # 1. استبعاد صيغ المعاينة والصور المصغرة (Storyboard)
-        if 'storyboard' in format_note or 'sb' in format_id or 'storyboard' in format_id:
+        vcodec = str(f.get('vcodec', '')).lower()
+        acodec = str(f.get('acodec', '')).lower()
+
+        # 1. استبعاد كلي لصور المعاينة و Storyboards ورسوم mjpeg
+        if any(sb in format_id for sb in ['sb0', 'sb1', 'sb2', 'sb3', 'storyboard']):
             continue
-        if ext in ['mhtml', 'jpg', 'jpeg', 'png', 'webp']:
+        if 'storyboard' in format_note or 'mhtml' in protocol:
             continue
-            
-        # 2. استبعاد روابط البث m3u8 غير الصالحة للتحميل المباشر
+        if ext in ['mhtml', 'jpg', 'jpeg', 'png', 'webp', 'gif']:
+            continue
+        if any(img in vcodec for img in ['jpeg', 'mjpeg', 'jpg', 'webp', 'none', 'null', '']):
+            continue
+
+        # 2. استبعاد روابط البث غير المباشرة
         if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u or ext == 'm3u8':
             continue
-            
-        vcodec = f.get('vcodec')
-        acodec = f.get('acodec')
-        
-        has_v = vcodec is not None and vcodec != 'none'
-        has_a = acodec is not None and acodec != 'none'
-        
+
+        has_v = True  # طالما تخطى الفلتر الأعلى، فهو فيديو حقيقي
+        has_a = acodec not in ['none', 'null', ''] and acodec is not None
+
         height = f.get('height', 0) or 0
         width = f.get('width', 0) or 0
         abr = f.get('abr', 0) or 0
-        
-        # استبعاد الفيديوهات/الصور المصغرة جداً
-        if height > 0 and height < 140 and width < 140:
-            continue
 
         valid_formats.append({
             'url': u,
@@ -79,8 +78,11 @@ def extract_clean_url(info, mode):
             'ext': ext
         })
 
+    if not valid_formats:
+        return main_url
+
     if mode == 'audio':
-        # وضع الصوت فقط
+        # اختيار الصوت فقط
         audio_only = [f for f in valid_formats if f['has_a'] and not f['has_v']]
         if audio_only:
             audio_only.sort(key=lambda x: x['abr'], reverse=True)
@@ -90,8 +92,8 @@ def extract_clean_url(info, mode):
             any_audio.sort(key=lambda x: x['abr'], reverse=True)
             return any_audio[0]['url']
     else:
-        # وضع الفيديو:
-        # 1. البحث أولاً عن فيديو مدمج فيه الصوت والصورة معاُ (Progressive MP4)
+        # اختيار الفيديو:
+        # أ) البحث عن فيديو يحتوي على صوت وصورة معاً (Progressive MP4)
         combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
         if combo:
             mp4_combo = [f for f in combo if f['ext'] == 'mp4']
@@ -100,14 +102,18 @@ def extract_clean_url(info, mode):
                 return mp4_combo[0]['url']
             combo.sort(key=lambda x: x['height'], reverse=True)
             return combo[0]['url']
-            
-        # 2. خيار احتياتي: أي فيديو صالح متاح
+
+        # ب) البحث عن أفضل فيديو MP4 حقيقي
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
+            mp4_video = [f for f in video_only if f['ext'] == 'mp4']
+            if mp4_video:
+                mp4_video.sort(key=lambda x: x['height'], reverse=True)
+                return mp4_video[0]['url']
             video_only.sort(key=lambda x: x['height'], reverse=True)
             return video_only[0]['url']
 
-    return valid_formats[0]['url'] if valid_formats else main_url
+    return valid_formats[0]['url']
 
 @app.route('/download', methods=['GET'])
 def get_download_link():
@@ -133,7 +139,6 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        # 'all' تمنع خطأ "Requested format is not available" كلياً
         'format': 'all',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -175,7 +180,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.0'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.1'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
