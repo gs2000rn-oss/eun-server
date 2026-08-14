@@ -1,76 +1,69 @@
 from flask import Flask, request, jsonify
 import yt_dlp
-import os
-import shutil
+import requests
 
 app = Flask(__name__)
 
-def get_cookie_path():
-    secret_path = '/etc/secrets/cookies.txt'
-    tmp_path = '/tmp/cookies.txt'
-    if os.path.exists(secret_path):
-        try:
-            shutil.copy(secret_path, tmp_path)
-            return tmp_path
-        except Exception:
-            return secret_path
-    return None
+USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+
+def get_real_pinterest_url(url):
+    """فك اختصار pin.it للحصول على الرابط الأصلي"""
+    try:
+        res = requests.get(url, allow_redirects=True, timeout=5, headers={'User-Agent': USER_AGENT})
+        return res.url
+    except Exception:
+        return url
 
 @app.route('/download', methods=['GET'])
 def download():
-    url = request.args.get('url')
-    mode = request.args.get('mode', 'video')
-
-    if not url:
+    raw_url = request.args.get('url')
+    if not raw_url:
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 200
 
-    # خيارات خفيفة بدون فرض صيغة محددة لتفادي خطأ Requested format is not available
+    target_url = get_real_pinterest_url(raw_url)
+
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        # تجنب صيغ m3u8 و hls كلياً والبحث عن mp4 مباشر
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'http_headers': {
+            'User-Agent': USER_AGENT,
+            'Referer': 'https://www.pinterest.com/'
+        }
     }
-
-    cookie_file = get_cookie_path()
-    if cookie_file:
-        ydl_opts['cookiefile'] = cookie_file
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(target_url, download=False)
             formats = info.get('formats', [])
-            download_url = None
+            
+            clean_mp4_url = None
 
-            if mode == 'audio':
-                # استخراج رابط الصوت فقط
-                audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-                if audio_formats:
-                    download_url = audio_formats[-1].get('url')
-            else:
-                # استخراج رابط فيديو مدمج (صوت + صورة)
-                prog_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') != 'none']
-                if prog_formats:
-                    download_url = prog_formats[-1].get('url')
+            # التفتيش في قائمة الصيغ لتجاهل أي رابط m3u8
+            for f in reversed(formats):
+                f_url = f.get('url', '')
+                ext = f.get('ext', '')
+                
+                # إستبعاد m3u8 نهائياً لضمان عدم ظهور 00:00
+                if (ext == 'mp4' or '.mp4' in f_url) and '.m3u8' not in f_url:
+                    clean_mp4_url = f_url
+                    break
 
-            # خيار احتياطي في حال عدم وجود صيغة مدمجة
-            if not download_url:
-                download_url = info.get('url')
-            if not download_url and formats:
-                download_url = formats[-1].get('url')
+            if not clean_mp4_url:
+                main_url = info.get('url', '')
+                if '.m3u8' not in main_url:
+                    clean_mp4_url = main_url
 
-            if download_url:
+            if clean_mp4_url:
                 return jsonify({
                     'status': 'success',
-                    'url': download_url,
-                    'title': info.get('title', 'Video')
+                    'url': clean_mp4_url,
+                    'title': info.get('title', 'Pinterest Video')
                 }), 200
             else:
-                return jsonify({'status': 'error', 'message': 'No URL found'}), 200
+                return jsonify({'status': 'error', 'message': 'No direct MP4 found'}), 200
 
     except Exception as e:
-        # إرجاع الخطأ بتنسيق JSON وبكود 200 حتى يقرأه الأندرويد بوضوح
         return jsonify({'status': 'error', 'message': str(e)}), 200
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
