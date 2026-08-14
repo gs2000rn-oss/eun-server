@@ -5,7 +5,7 @@ import os
 
 app = Flask(__name__)
 
-# قائمة محدثة وموسعة لـ Invidious
+# قائمة سيرفرات Invidious البديلة ليوتيوب
 INVIDIOUS_INSTANCES = [
     "https://invidious.nerdvpn.de",
     "https://inv.nadeko.net",
@@ -20,10 +20,8 @@ def get_yt_via_invidious(video_id):
             res = requests.get(f"{instance}/api/v1/videos/{video_id}", timeout=5)
             if res.status_code == 200:
                 data = res.json()
-                # جلب الرابط من formatStreams
                 streams = data.get("formatStreams", [])
                 if streams:
-                    # اختيار أعلى جودة فيديو (غالباً الأخير في القائمة)
                     best_stream = streams[-1]
                     return {
                         'status': 'success',
@@ -42,7 +40,14 @@ def get_download_link():
     if not url:
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
 
-    # إعدادات متطورة تحاكي متصفح Desktop لتجاوز حظر Pinterest
+    # 1. فك توجيه رابط بينتيريست المختصر (pin.it) للحصول على الرابط الكامل
+    if 'pin.it' in url:
+        try:
+            r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}, timeout=5, allow_redirects=True)
+            url = r.url
+        except Exception as e:
+            print(f"Pinterest redirect error: {e}")
+
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -55,8 +60,6 @@ def get_download_link():
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
-            # محاولة جلب الرابط
             download_url = info.get('url') or info.get('redirect_url')
             
             if 'formats' in info and not download_url:
@@ -79,20 +82,22 @@ def get_download_link():
     except Exception as e:
         print(f"yt-dlp error: {e}")
 
-    # إذا فشل yt-dlp، نحاول استخراج Video ID ليوتيوب حصراً واستخدام Invidious
+    # 2. استخراج معرف يوتيوب (يشمل الفيديوهات العادية و Shorts) وتفعيل Invidious البديل
     if 'youtube.com' in url or 'youtu.be' in url:
         video_id = None
         if 'youtu.be/' in url:
             video_id = url.split('youtu.be/')[1].split('?')[0].split('&')[0]
         elif 'watch?v=' in url:
-            video_id = url.split('watch?v=')[1].split('?')[0].split('&')[0]
+            video_id = url.split('watch?v=').pop().split('?')[0].split('&')[0]
+        elif '/shorts/' in url:
+            video_id = url.split('/shorts/')[1].split('?')[0].split('&')[0]
         
         if video_id:
             inv_res = get_yt_via_invidious(video_id)
             if inv_res:
                 return jsonify(inv_res)
 
-    return jsonify({'status': 'error', 'message': 'Failed to extract video link. Service might be blocked.'}), 500
+    return jsonify({'status': 'error', 'message': 'Failed to extract video link.'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
