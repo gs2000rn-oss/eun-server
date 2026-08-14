@@ -1,4 +1,7 @@
-requests==2.31.0
-yt-dlp>=2024.03.10
+Flask
+yt-dlp
+requests
+gunicorn
+
 
 
