@@ -3,6 +3,7 @@ import yt_dlp
 import os
 import shutil
 import logging
+import requests
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,86 +25,98 @@ def setup_cookies():
         return 'cookies.txt'
     return None
 
+def fetch_via_cobalt_engine(url, mode):
+    """محرك احتياطي داخلي يتجاوز حظر يوتيوب لـ Render IPs"""
+    nodes = [
+        "https://cobalt-api.kwiatek.xyz",
+        "https://api.cobalt.tools",
+        "https://cobalt.canine.tools"
+    ]
+    payload = {
+        "url": url,
+        "videoQuality": "720",
+        "downloadMode": "audio" if mode == "audio" else "auto"
+    }
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": USER_AGENT
+    }
+    
+    for node in nodes:
+        try:
+            res = requests.post(f"{node}/", json=payload, headers=headers, timeout=7)
+            if res.status_code == 200:
+                data = res.json()
+                if "url" in data:
+                    return data["url"], "YouTube Video (Fast Engine)"
+                elif "picker" in data and len(data["picker"]) > 0:
+                    return data["picker"][0]["url"], "YouTube Video (Fast Engine)"
+        except Exception as e:
+            logger.error(f"Fallback node failed: {e}")
+    return None, None
+
 @app.route('/download', methods=['GET'])
 def download():
     url = request.args.get('url')
     mode = request.args.get('mode', 'video')
 
     if not url:
-        return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
+        return jsonify({'status': 'error', 'message': 'No URL provided'}), 200
 
     cookie_path = setup_cookies()
 
-    # إلغاء خيار format الصارم نهائياً لتفادي خطأ "Requested format is not available"
+    # 1. المحاولة الأولى باستخدام yt-dlp
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'http_headers': {
-            'User-Agent': USER_AGENT,
-            'Accept-Language': 'en-US,en;q=0.9',
-        },
+        'http_headers': {'User-Agent': USER_AGENT},
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'mweb', 'ios'],
+                'player_client': ['ios', 'mweb', 'android'],
             }
         }
     }
-
     if cookie_path:
         ydl_opts['cookiefile'] = cookie_path
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # استخراج معلومات الفيديو بدون فرض صيغة معينة
             info = ydl.extract_info(url, download=False)
-            if not info:
-                return jsonify({'status': 'error', 'message': 'Failed to extract info'}), 500
+            if info:
+                title = info.get('title', 'Downloaded Media')
+                download_url = None
+                formats = info.get('formats', [])
 
-            title = info.get('title', 'Video')
-            download_url = None
-            formats = info.get('formats', [])
+                if mode == 'audio':
+                    audio_fmt = [f for f in formats if f.get('acodec') != 'none' and (not f.get('vcodec') or f.get('vcodec') == 'none')]
+                    if audio_fmt:
+                        download_url = audio_fmt[-1].get('url')
+                else:
+                    prog_fmt = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
+                    if prog_fmt:
+                        download_url = prog_fmt[-1].get('url')
 
-            if mode == 'audio':
-                # اختيار أفضل مسار صوتي متوفر
-                audio_formats = [
-                    f for f in formats 
-                    if f.get('acodec') != 'none' and (not f.get('vcodec') or f.get('vcodec') == 'none')
-                ]
-                if audio_formats:
-                    audio_formats.sort(key=lambda x: x.get('abr') or 0, reverse=True)
-                    download_url = audio_formats[0].get('url')
-            else:
-                # 1. البحث عن صيغة مدمجة (صوت + صورة معاً)
-                progressive_formats = [
-                    f for f in formats 
-                    if f.get('vcodec') != 'none' and f.get('acodec') != 'none'
-                    and not f.get('url', '').endswith('.m3u8')
-                ]
-                if progressive_formats:
-                    progressive_formats.sort(key=lambda x: x.get('height') or 0, reverse=True)
-                    download_url = progressive_formats[0].get('url')
+                if not download_url:
+                    download_url = info.get('url')
 
-            # 2. إذا لم يجد صيغة مدمجة، يتخذ الرابط المباشر العام للـ info
-            if not download_url:
-                download_url = info.get('url')
-
-            # 3. خطة احتياطية أخيرة: أخذ آخر صيغة متوفرة في قائمة formats
-            if not download_url and formats:
-                download_url = formats[-1].get('url')
-
-            if download_url:
-                return jsonify({
-                    'status': 'success',
-                    'url': download_url,
-                    'title': title
-                })
-            else:
-                return jsonify({'status': 'error', 'message': 'No playable link found'}), 500
-
+                if download_url:
+                    return jsonify({'status': 'success', 'url': download_url, 'title': title}), 200
     except Exception as e:
-        logger.error(f"yt-dlp error: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        logger.error(f"yt-dlp error on Render: {str(e)}")
+
+    # 2. المحاولة الثانية (الخطة B تلقائياً من داخل السيرفر):
+    logger.info("Switching to internal fallback engine...")
+    fallback_url, fallback_title = fetch_via_cobalt_engine(url, mode)
+    if fallback_url:
+        return jsonify({'status': 'success', 'url': fallback_url, 'title': fallback_title}), 200
+
+    # ارجاع 200 دائماً لكي يقرأ الأندرويد رسالة JSON بوضوح
+    return jsonify({
+        'status': 'error',
+        'message': 'YouTube blocked the extraction. Please try again.'
+    }), 200
 
 @app.route('/', methods=['GET'])
 def home():
