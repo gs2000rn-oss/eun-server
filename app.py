@@ -28,13 +28,9 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط فيديو MP4 حقيقي واستبعاد كافة صور mjpeg و storyboards"""
+    """استخراج رابط فيديو MP4 حقيقي واستبعاد كافة صور المعاينة والـ Storyboard"""
     formats = info.get('formats', [])
-    main_url = info.get('url')
     
-    if not formats:
-        return main_url
-
     valid_formats = []
     for f in formats:
         u = f.get('url')
@@ -47,26 +43,23 @@ def extract_clean_url(info, mode):
         ext = str(f.get('ext', '')).lower()
         vcodec = str(f.get('vcodec', '')).lower()
         acodec = str(f.get('acodec', '')).lower()
+        fps = f.get('fps') or 0
 
-        # 1. استبعاد كلي لصور المعاينة و Storyboards ورسوم mjpeg
-        if any(sb in format_id for sb in ['sb0', 'sb1', 'sb2', 'sb3', 'storyboard']):
-            continue
-        if 'storyboard' in format_note or 'mhtml' in protocol:
+        # 1. فلترة صريحة وقاطعة لشبكات الصور والـ Storyboards
+        if format_id.startswith('sb') or 'storyboard' in format_id or 'storyboard' in format_note:
             continue
         if ext in ['mhtml', 'jpg', 'jpeg', 'png', 'webp', 'gif']:
             continue
-        if any(img in vcodec for img in ['jpeg', 'mjpeg', 'jpg', 'webp', 'none', 'null', '']):
+        if any(img in vcodec for img in ['jpeg', 'mjpeg', 'jpg', 'webp', 'none', 'null', 'images']):
+            continue
+        if 'mhtml' in protocol or '.m3u8' in u:
             continue
 
-        # 2. استبعاد روابط البث غير المباشرة
-        if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u or ext == 'm3u8':
-            continue
-
-        has_v = True  # طالما تخطى الفلتر الأعلى، فهو فيديو حقيقي
-        has_a = acodec not in ['none', 'null', ''] and acodec is not None
+        # 2. التحقق من وجود فيديو حقيقي (يجب أن يحتوي على fps وبكسلات)
+        has_v = (vcodec not in ['none', 'null', '']) and (fps > 0)
+        has_a = (acodec not in ['none', 'null', ''])
 
         height = f.get('height', 0) or 0
-        width = f.get('width', 0) or 0
         abr = f.get('abr', 0) or 0
 
         valid_formats.append({
@@ -75,45 +68,36 @@ def extract_clean_url(info, mode):
             'has_a': has_a,
             'height': height,
             'abr': abr,
-            'ext': ext
+            'ext': ext,
+            'format_id': format_id
         })
 
-    if not valid_formats:
-        return main_url
-
     if mode == 'audio':
-        # اختيار الصوت فقط
-        audio_only = [f for f in valid_formats if f['has_a'] and not f['has_v']]
-        if audio_only:
-            audio_only.sort(key=lambda x: x['abr'], reverse=True)
-            return audio_only[0]['url']
-        any_audio = [f for f in valid_formats if f['has_a']]
-        if any_audio:
-            any_audio.sort(key=lambda x: x['abr'], reverse=True)
-            return any_audio[0]['url']
+        # اختيار أفضل مقطع صوتي
+        audio_formats = [f for f in valid_formats if f['has_a']]
+        if audio_formats:
+            audio_formats.sort(key=lambda x: x['abr'], reverse=True)
+            return audio_formats[0]['url']
     else:
-        # اختيار الفيديو:
-        # أ) البحث عن فيديو يحتوي على صوت وصورة معاً (Progressive MP4)
-        combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
-        if combo:
-            mp4_combo = [f for f in combo if f['ext'] == 'mp4']
-            if mp4_combo:
-                mp4_combo.sort(key=lambda x: x['height'], reverse=True)
-                return mp4_combo[0]['url']
-            combo.sort(key=lambda x: x['height'], reverse=True)
-            return combo[0]['url']
+        # اختيار فيديو حقيقي:
+        # أ) إعطاء الأولوية للفيديوهات التي تحتوي على صوت وصورة معا (مثل MP4 المباشر 720p/360p)
+        combo_mp4 = [f for f in valid_formats if f['has_v'] and f['has_a'] and f['ext'] == 'mp4']
+        if combo_mp4:
+            combo_mp4.sort(key=lambda x: x['height'], reverse=True)
+            return combo_mp4[0]['url']
 
-        # ب) البحث عن أفضل فيديو MP4 حقيقي
+        combo_any = [f for f in valid_formats if f['has_v'] and f['has_a']]
+        if combo_any:
+            combo_any.sort(key=lambda x: x['height'], reverse=True)
+            return combo_any[0]['url']
+
+        # ب) إذا لم يوجد، اختيار أفضل فيديو MP4 حقيقي بـ fps > 0
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
-            mp4_video = [f for f in video_only if f['ext'] == 'mp4']
-            if mp4_video:
-                mp4_video.sort(key=lambda x: x['height'], reverse=True)
-                return mp4_video[0]['url']
             video_only.sort(key=lambda x: x['height'], reverse=True)
             return video_only[0]['url']
 
-    return valid_formats[0]['url']
+    return info.get('url')
 
 @app.route('/download', methods=['GET'])
 def get_download_link():
@@ -123,12 +107,11 @@ def get_download_link():
     if not url:
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
 
-    # فك روابط Pinterest المختصرة
+    # حل روابط Pinterest
     if 'pin.it' in url or 'pinterest' in url:
         try:
             response = requests.head(url, allow_redirects=True, timeout=5)
             url = response.url
-            logger.info(f"Resolved Pinterest URL: {url}")
         except Exception as e:
             logger.error(f"Failed to resolve shortlink: {e}")
 
@@ -139,14 +122,14 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
-        'format': 'all',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best' if mode == 'video' else 'bestaudio/best',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'mweb'],
+                'player_client': ['android', 'ios', 'web'],
                 'skip': ['webpage', 'configs']
             }
         }
@@ -180,7 +163,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.1'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.2'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
