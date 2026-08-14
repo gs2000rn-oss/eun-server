@@ -1,10 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 import yt_dlp
 import os
 import shutil
 import logging
 import traceback
 import requests
+import base64
+from urllib.parse import quote, unquote
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,10 +35,9 @@ def resolve_short_url(url):
             r = requests.head(url, allow_redirects=True, timeout=12,
                               headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'})
             if r.url and r.url != url:
-                logger.info(f"Resolved → {r.url}")
                 return r.url
-    except Exception as e:
-        logger.warning(f"resolve failed: {e}")
+    except:
+        pass
     return url
 
 
@@ -61,7 +62,6 @@ def get_best_url(info, mode='video'):
         tbr = f.get('tbr') or 0
         abr = f.get('abr') or 0
 
-        # استبعاد الصور والـ storyboard
         if any(x in note for x in ['storyboard', 'preview', 'image', 'thumbnail']):
             continue
         if any(x in fid for x in ['sb0', 'sb1', 'sb2', 'sb3', 'storyboard', 'thumb']):
@@ -73,15 +73,8 @@ def get_best_url(info, mode='video'):
         has_a = acodec not in ('none', 'null', '')
 
         candidates.append({
-            'url': u,
-            'height': height,
-            'has_v': has_v,
-            'has_a': has_a,
-            'ext': ext,
-            'tbr': tbr,
-            'abr': abr,
-            'fid': fid,
-            'proto': proto
+            'url': u, 'height': height, 'has_v': has_v, 'has_a': has_a,
+            'ext': ext, 'tbr': tbr, 'abr': abr, 'proto': proto
         })
 
     if not candidates:
@@ -95,21 +88,19 @@ def get_best_url(info, mode='video'):
         with_a = [c for c in candidates if c['has_a']]
         return with_a[0]['url'] if with_a else candidates[0]['url']
 
-    # فيديو: نفضل progressive (فيديو + صوت)
+    # progressive first
     progressive = [c for c in candidates if c['has_v'] and c['has_a']]
     if progressive:
         progressive.sort(key=lambda x: (x['height'], x['tbr']), reverse=True)
-        logger.info(f"Selected progressive {progressive[0]['height']}p")
         return progressive[0]['url']
 
-    # Pinterest / Twitter: نفضل non-HLS
+    # Pinterest / Twitter prefer non-HLS
     if 'pinterest' in extractor or 'twitter' in extractor:
         non_hls = [c for c in candidates if c['has_v'] and 'm3u8' not in c['proto'] and '.m3u8' not in c['url']]
         if non_hls:
             non_hls.sort(key=lambda x: (x['height'], x['tbr']), reverse=True)
             return non_hls[0]['url']
 
-    # فيديو فقط
     video_only = [c for c in candidates if c['has_v']]
     if video_only:
         video_only.sort(key=lambda x: (x['height'], x['tbr']), reverse=True)
@@ -120,11 +111,7 @@ def get_best_url(info, mode='video'):
 
 @app.route('/')
 def home():
-    return jsonify({
-        'status': 'online',
-        'version': '8.0-json-for-app',
-        'message': 'Returns JSON with direct url for your Android app'
-    })
+    return jsonify({'status': 'online', 'version': '9.0-proxy'})
 
 
 @app.route('/health')
@@ -132,23 +119,20 @@ def health():
     cookies = setup_cookies()
     ok = bool(cookies and os.path.exists(cookies))
     size = os.path.getsize(cookies) if ok else 0
-    return jsonify({
-        'status': 'ok',
-        'cookies_found': ok,
-        'cookies_size': size
-    })
+    return jsonify({'status': 'ok', 'cookies_found': ok, 'cookies_size': size})
 
 
 @app.route('/download', methods=['GET', 'POST'])
 def download():
+    """يرجع JSON فيه رابط proxy من سيرفرنا (عشان DownloadManager)"""
     url = request.args.get('url') or request.form.get('url')
     mode = request.args.get('mode', 'video')
 
     if not url:
-        return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
+        return jsonify({'status': 'error', 'message': 'No URL'}), 400
 
     url = resolve_short_url(url)
-    logger.info(f"JSON download request: {url} mode={mode}")
+    logger.info(f"Request: {url}")
 
     is_youtube = any(x in url for x in ['youtube.com', 'youtu.be'])
     is_pinterest = 'pinterest' in url or 'pin.it' in url
@@ -159,7 +143,6 @@ def download():
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extract_flat': False,
         'skip_download': True,
         'format': 'all',
         'http_headers': {
@@ -174,7 +157,6 @@ def download():
         ydl_opts['extractor_args'] = {
             'youtube': {
                 'player_client': ['android', 'android_sdkless', 'web', 'mweb', 'tv', 'ios'],
-                'player_skip': ['webpage', 'configs'],
             }
         }
     if is_pinterest:
@@ -192,26 +174,33 @@ def download():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
-                return jsonify({'status': 'error', 'message': 'Failed to extract info'}), 500
+                return jsonify({'status': 'error', 'message': 'Failed to extract'}), 500
 
-            title = info.get('title') or info.get('id') or 'media'
+            title = info.get('title') or 'video'
             duration = info.get('duration')
-            download_url = get_best_url(info, mode)
+            real_url = get_best_url(info, mode)
 
-            if not download_url:
-                return jsonify({'status': 'error', 'message': 'No playable URL found'}), 500
+            if not real_url:
+                return jsonify({'status': 'error', 'message': 'No playable URL'}), 500
 
-            # حماية من الصور
-            low = download_url.lower()
-            if any(x in low for x in ['.jpg', '.jpeg', '.png', '.webp', 'storyboard', 'ggpht.com', '/images/']):
-                return jsonify({'status': 'error', 'message': 'Got image instead of video'}), 500
+            # نرجع رابط proxy من سيرفرنا (مش الرابط الأصلي)
+            # عشان DownloadManager ينزل بدون ما يحتاج Referer
+            encoded = base64.urlsafe_b64encode(real_url.encode()).decode()
+            proxy_url = f"https://eun-server.onrender.com/stream?u={encoded}"
 
-            logger.info(f"SUCCESS: {title[:40]} | duration={duration}")
+            # نحدد الـ referer اللي يحتاجه الـ stream
+            referer = 'https://www.pinterest.com/' if is_pinterest else \
+                      'https://x.com/' if is_twitter else \
+                      'https://www.instagram.com/' if is_instagram else \
+                      'https://www.youtube.com/'
 
-            # === هذا الشكل اللي تطبيقك يتوقعه ===
+            # نضيف الـ referer كـ query أيضاً
+            ref_encoded = base64.urlsafe_b64encode(referer.encode()).decode()
+            proxy_url += f"&r={ref_encoded}"
+
             return jsonify({
                 'status': 'success',
-                'url': download_url,
+                'url': proxy_url,
                 'title': title,
                 'duration': duration
             })
@@ -219,15 +208,54 @@ def download():
     except Exception as e:
         err = str(e)
         logger.error(traceback.format_exc())
+        return jsonify({'status': 'error', 'message': err[:400]}), 500
 
-        if 'No video formats found' in err:
-            msg = 'No video formats found (YouTube often blocks free servers)'
-        elif 'Sign in to confirm' in err or 'not a bot' in err.lower():
-            msg = 'YouTube bot detection - update cookies'
-        else:
-            msg = err[:350]
 
-        return jsonify({'status': 'error', 'message': msg}), 500
+@app.route('/stream')
+def stream():
+    """يحمل الفيديو من المصدر مع الـ headers الصحيحة ويرسله للتطبيق"""
+    u = request.args.get('u')
+    r = request.args.get('r')
+
+    if not u:
+        return "Missing u", 400
+
+    try:
+        real_url = base64.urlsafe_b64decode(u.encode()).decode()
+        referer = base64.urlsafe_b64decode(r.encode()).decode() if r else 'https://www.pinterest.com/'
+    except Exception:
+        return "Invalid encoding", 400
+
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Referer': referer,
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+
+    try:
+        # نستخدم stream=True عشان ما نحمّل الملف كامل في الذاكرة
+        resp = requests.get(real_url, headers=headers, stream=True, timeout=60)
+
+        if resp.status_code != 200:
+            return f"Upstream error {resp.status_code}", 502
+
+        def generate():
+            for chunk in resp.iter_content(chunk_size=1024 * 64):
+                if chunk:
+                    yield chunk
+
+        return Response(
+            stream_with_context(generate()),
+            content_type=resp.headers.get('Content-Type', 'video/mp4'),
+            headers={
+                'Content-Disposition': 'attachment; filename="video.mp4"',
+                'Content-Length': resp.headers.get('Content-Length', ''),
+            }
+        )
+    except Exception as e:
+        logger.error(f"Stream error: {e}")
+        return str(e), 500
 
 
 if __name__ == '__main__':
