@@ -1,9 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import yt_dlp
 import os
 import shutil
 import logging
+import tempfile
+import traceback
 import requests
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,162 +21,130 @@ def setup_cookies():
             shutil.copy(secret, tmp)
             return tmp
         except Exception as e:
-            logger.error(f"cookies copy error: {e}")
+            logger.error(f"cookies error: {e}")
             return secret
     if os.path.exists('cookies.txt'):
         return 'cookies.txt'
     return None
 
 
-def get_best_url(info, mode='video'):
-    """يختار أفضل رابط حقيقي (مش صورة ولا storyboard)"""
-    formats = info.get('formats') or []
-    main_url = info.get('url')
-
-    valid = []
-    for f in formats:
-        u = f.get('url')
-        if not u:
-            continue
-
-        note = str(f.get('format_note', '')).lower()
-        fmt_id = str(f.get('format_id', '')).lower()
-        ext = str(f.get('ext', '')).lower()
-        protocol = str(f.get('protocol', '')).lower()
-        vcodec = str(f.get('vcodec', 'none')).lower()
-        acodec = str(f.get('acodec', 'none')).lower()
-        height = f.get('height') or 0
-
-        # استبعاد الصور والـ storyboard و m3u8
-        if any(x in note for x in ['storyboard', 'preview', 'image']):
-            continue
-        if any(x in fmt_id for x in ['sb0', 'sb1', 'sb2', 'storyboard', 'thumb']):
-            continue
-        if ext in ['jpg', 'jpeg', 'png', 'webp', 'gif']:
-            continue
-        if '.m3u8' in u or 'm3u8' in protocol:
-            continue
-
-        has_v = vcodec not in ['none', '']
-        has_a = acodec not in ['none', '']
-
-        valid.append({
-            'url': u,
-            'height': height,
-            'has_v': has_v,
-            'has_a': has_a,
-            'ext': ext,
-            'tbr': f.get('tbr') or 0,
-            'abr': f.get('abr') or 0
-        })
-
-    if not valid:
-        return main_url
-
-    if mode == 'audio':
-        audios = [x for x in valid if x['has_a'] and not x['has_v']]
-        if audios:
-            audios.sort(key=lambda x: x['abr'] or x['tbr'], reverse=True)
-            return audios[0]['url']
-        any_a = [x for x in valid if x['has_a']]
-        return any_a[0]['url'] if any_a else valid[0]['url']
-
-    # فيديو: نفضل progressive (فيديو+صوت)
-    progressive = [x for x in valid if x['has_v'] and x['has_a']]
-    if progressive:
-        progressive.sort(key=lambda x: (x['height'], x['tbr']), reverse=True)
-        return progressive[0]['url']
-
-    # فيديو فقط
-    videos = [x for x in valid if x['has_v']]
-    if videos:
-        videos.sort(key=lambda x: x['height'], reverse=True)
-        return videos[0]['url']
-
-    return valid[0]['url']
-
-
 @app.route('/')
 def home():
     return jsonify({
         'status': 'online',
-        'service': 'Shark Engine Multi',
-        'version': '3.9-restore',
-        'supports': ['youtube', 'tiktok', 'instagram', 'facebook', 'twitter', 'pinterest']
+        'version': '6.0-merge-audio',
+        'supports': ['Instagram', 'TikTok', 'Facebook', 'YouTube', 'Pinterest', 'Twitter'],
+        'usage': '/download?url=LINK'
+    })
+
+
+@app.route('/health')
+def health():
+    cookies = setup_cookies()
+    ok = bool(cookies and os.path.exists(cookies))
+    size = os.path.getsize(cookies) if ok else 0
+    return jsonify({
+        'status': 'ok',
+        'cookies_found': ok,
+        'cookies_size': size
     })
 
 
 @app.route('/download', methods=['GET', 'POST'])
-def get_download_link():
+def download():
     url = request.args.get('url') or request.form.get('url')
-    mode = request.args.get('mode', 'video')
-
     if not url:
-        return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
+        return jsonify({'status': 'error', 'message': 'أضف ?url=الرابط'}), 400
 
     # فك الروابط المختصرة
-    if any(x in url for x in ['pin.it', 'vm.tiktok.com', 'vt.tiktok.com', 'fb.watch', 't.co']):
-        try:
-            r = requests.head(url, allow_redirects=True, timeout=8,
-                            headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        if any(x in url for x in ['pin.it', 'vm.tiktok.com', 'vt.tiktok.com', 'fb.watch', 't.co', 'instagram.com/reel', 'instagram.com/p/']):
+            r = requests.head(url, allow_redirects=True, timeout=10,
+                              headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
             url = r.url
-            logger.info(f"Resolved short url → {url}")
-        except Exception as e:
-            logger.warning(f"shortlink failed: {e}")
+            logger.info(f"Resolved → {url}")
+    except Exception as e:
+        logger.warning(f"resolve failed: {e}")
 
-    logger.info(f"Processing: {url} | mode={mode}")
+    cookie_file = setup_cookies()
+    temp_dir = tempfile.mkdtemp(prefix='media_')
 
+    # أهم جزء: دمج فيديو + صوت
     ydl_opts = {
+        'format': 'bestvideo+bestaudio/best',           # يجبر الدمج
+        'outtmpl': os.path.join(temp_dir, '%(title).50s.%(ext)s'),
+        'merge_output_format': 'mp4',                   # الناتج دائماً mp4
+        'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
-        'noplaylist': True,
-        'extract_flat': False,
-        'format': 'all',
+        'restrictfilenames': True,
+        'retries': 12,
+        'fragment_retries': 12,
+        'socket_timeout': 30,
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
         },
         'extractor_args': {
-            'youtube': {
-                'player_client': ['android', 'web', 'mweb'],
-                'player_skip': ['webpage', 'configs']
-            }
-        }
+            'youtube': {'player_client': ['android', 'web', 'mweb']},
+            'instagram': {},
+        },
+        'postprocessors': [{
+            'key': 'FFmpegVideoConvertor',
+            'preferedformat': 'mp4',
+        }],
     }
 
-    cookie_file = setup_cookies()
     if cookie_file:
         ydl_opts['cookiefile'] = cookie_file
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info:
-                return jsonify({'status': 'error', 'message': 'Failed to extract media'}), 500
+            info = ydl.extract_info(url, download=True)
+            
+            filename = ydl.prepare_filename(info)
+            
+            # ابحث عن الملف النهائي
+            if not os.path.exists(filename):
+                files = list(Path(temp_dir).rglob('*'))
+                files = [f for f in files if f.is_file() and f.stat().st_size > 10000]
+                if not files:
+                    raise Exception('ما نزل أي ملف صالح')
+                filename = str(max(files, key=lambda p: p.stat().st_size))
 
-            title = info.get('title', 'Downloaded_Media')
-            download_url = get_best_url(info, mode)
+            size_mb = os.path.getsize(filename) / (1024*1024)
+            logger.info(f"Ready: {size_mb:.2f} MB → {filename}")
 
-            if not download_url:
-                return jsonify({'status': 'error', 'message': 'No valid playable link found'}), 500
-
-            # حماية من الصور
-            low = download_url.lower()
-            if any(x in low for x in ['.jpg', '.png', '.webp', 'storyboard', 'ggpht.com', 'googleusercontent']):
+            if size_mb < 0.05:
                 return jsonify({
                     'status': 'error',
-                    'message': 'Got image/storyboard instead of video'
+                    'message': f'الملف صغير جداً ({size_mb:.2f} MB) — فشل التحميل'
                 }), 500
 
-            return jsonify({
-                'status': 'success',
-                'url': download_url,
-                'title': title
-            })
+            # اسم نظيف
+            title = (info.get('title') or 'video')[:50]
+            safe = "".join(c if c.isalnum() or c in ' ._-' else '_' for c in title).strip()
+            if not safe:
+                safe = 'video'
+            download_name = safe + '.mp4'
+
+            return send_file(
+                filename,
+                as_attachment=True,
+                download_name=download_name,
+                mimetype='video/mp4'
+            )
 
     except Exception as e:
-        logger.error(f"Extraction error: {str(e)}")
-        return jsonify({'status': 'error', 'message': f"Extraction failed: {str(e)}"}), 500
+        err = str(e)
+        logger.error(err)
+        if 'Sign in to confirm' in err or 'not a bot' in err.lower():
+            msg = 'YouTube رفض (Bot). أعد تصدير cookies.txt من Incognito'
+        elif 'ffmpeg' in err.lower() or 'merging' in err.lower():
+            msg = 'مشكلة في دمج الصوت (تأكد إن ffmpeg مثبت في Build Command)'
+        else:
+            msg = err[:450]
+        return jsonify({'status': 'error', 'message': msg}), 500
 
 
 if __name__ == '__main__':
