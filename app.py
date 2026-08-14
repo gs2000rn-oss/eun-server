@@ -27,66 +27,6 @@ def setup_cookies():
         return 'cookies.txt'
     return None
 
-def extract_clean_url(info, mode):
-    """استخراج أفضل رابط مباشر وصالح للتحميل مع استبعاد m3u8"""
-    main_url = info.get('url')
-    formats = info.get('formats', [])
-    
-    if not formats:
-        return main_url
-
-    valid_formats = []
-    for f in formats:
-        u = f.get('url')
-        if not u:
-            continue
-            
-        protocol = f.get('protocol', '')
-        # استبعاد روابط m3u8 المخصصة للبث المباشر
-        if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u:
-            continue
-            
-        vcodec = f.get('vcodec', 'none')
-        acodec = f.get('acodec', 'none')
-        height = f.get('height', 0) or 0
-        abr = f.get('abr', 0) or 0
-        
-        valid_formats.append({
-            'url': u,
-            'has_v': vcodec != 'none',
-            'has_a': acodec != 'none',
-            'height': height,
-            'abr': abr
-        })
-
-    if mode == 'audio':
-        # 1. البحث عن صوت فقط
-        audio_only = [f for f in valid_formats if f['has_a'] and not f['has_v']]
-        if audio_only:
-            audio_only.sort(key=lambda x: x['abr'], reverse=True)
-            return audio_only[0]['url']
-        # 2. أي مسار يحتوي على صوت
-        any_audio = [f for f in valid_formats if f['has_a']]
-        if any_audio:
-            return any_audio[0]['url']
-    else:
-        # 1. البحث عن فيديو مدمج بصوت وصورة (Progressive MP4)
-        combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
-        if combo:
-            combo.sort(key=lambda x: x['height'], reverse=True)
-            return combo[0]['url']
-            
-        # 2. البحث عن أي فيديو صالح
-        video_only = [f for f in valid_formats if f['has_v']]
-        if video_only:
-            video_only.sort(key=lambda x: x['height'], reverse=True)
-            return video_only[0]['url']
-
-    if main_url and '.m3u8' not in main_url:
-        return main_url
-
-    return valid_formats[0]['url'] if valid_formats else main_url
-
 @app.route('/download', methods=['GET'])
 def get_download_link():
     url = request.args.get('url')
@@ -95,7 +35,7 @@ def get_download_link():
     if not url:
         return jsonify({'status': 'error', 'message': 'No URL provided'}), 400
 
-    # فك روابط Pinterest المختصرة
+    # فك روابط Pinterest المختصرة إن وجدت
     if 'pin.it' in url or 'pinterest' in url:
         try:
             response = requests.head(url, allow_redirects=True, timeout=5)
@@ -106,13 +46,20 @@ def get_download_link():
 
     logger.info(f"Processing URL: {url} | Mode: {mode}")
 
+    # تحديد صيغة التحميل بناءً على طلب المستخدم (فيديو أو صوت)
+    if mode == 'audio':
+        # أفضل جودة صوت بصيغة m4a أو أي صيغة صوتية مدعومة
+        format_selector = 'bestaudio[ext=m4a]/bestaudio/best'
+    else:
+        # السر هنا: نطلب أفضل فيديو مدمج (صوت وصورة) بصيغة MP4
+        # (غالباً سيكون 720p أو 360p لأن يوتيوب لا يوفر 1080p مدمج برابط واحد)
+        format_selector = 'best[ext=mp4]/best'
+
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extract_flat': False,
-        # هذا الخيار يمنع خطأ 'Requested format is not available' كلياً
-        'format': 'all',
+        'format': format_selector, # استخدام الفلتر المخصص
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
@@ -120,7 +67,6 @@ def get_download_link():
         'extractor_args': {
             'youtube': {
                 'player_client': ['mweb', 'tv_embedded', 'ios', 'android'],
-                'skip': ['webpage', 'configs']
             }
         }
     }
@@ -131,12 +77,15 @@ def get_download_link():
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # نستخرج المعلومات ونترك yt-dlp تختار الرابط المدمج الصحيح
             info = ydl.extract_info(url, download=False)
             if not info:
                 return jsonify({'status': 'error', 'message': 'Failed to extract media'}), 500
 
             title = info.get('title', 'Downloaded_Media')
-            download_url = extract_clean_url(info, mode)
+            
+            # الرابط المستخرج هنا سيكون مدمجاً وصالحاً للتحميل مباشرة
+            download_url = info.get('url')
 
             if download_url:
                 return jsonify({
@@ -153,7 +102,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.7'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.8'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
