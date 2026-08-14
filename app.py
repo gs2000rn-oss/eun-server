@@ -45,19 +45,18 @@ def get_download_link():
 
     logger.info(f"Processing URL: {url} | Mode: {mode}")
 
-    # إعدادات yt_dlp مع تفعيل عميل التلفزيون لتجاوز الحظر السحابي نهائياً
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['tv', 'android']
-            }
-        },
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
             'Accept-Language': 'en-US,en;q=0.9',
+        },
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'web']
+            }
         }
     }
 
@@ -72,29 +71,58 @@ def get_download_link():
                 return jsonify({'status': 'error', 'message': 'Failed to extract media'}), 500
 
             title = info.get('title', 'Downloaded_Media')
-            
-            # البحث الذكي عن رابط فيديو حقيقي صالح واستبعاد الصور تماماً
-            download_url = None
             formats = info.get('formats', [])
             
-            for f in formats:
-                f_url = f.get('url')
-                f_id = str(f.get('format_id', '')).lower()
-                vcodec = str(f.get('vcodec', '')).lower()
+            download_url = None
+            
+            if mode == 'audio':
+                audio_formats = []
+                for f in formats:
+                    u = f.get('url')
+                    acodec = str(f.get('acodec', '')).lower()
+                    if u and acodec and acodec != 'none':
+                        audio_formats.append(f)
+                if audio_formats:
+                    audio_formats.sort(key=lambda x: x.get('abr', 0) or 0, reverse=True)
+                    download_url = audio_formats[0].get('url')
+            else:
+                # تصفية واختيار أفضل جودة فيديو واضحة مع صوتها لتجنب التشويش والصور
+                valid_videos = []
+                for f in formats:
+                    u = f.get('url')
+                    if not u:
+                        continue
+                    format_id = str(f.get('format_id', '')).lower()
+                    format_note = str(f.get('format_note', '')).lower()
+                    vcodec = str(f.get('vcodec', '')).lower()
+                    acodec = str(f.get('acodec', '')).lower()
+                    ext = str(f.get('ext', '')).lower()
+                    
+                    # استبعاد تام لصور المعاينة والقصص المصغرة
+                    if format_id.startswith('sb') or 'storyboard' in format_id or 'storyboard' in format_note:
+                        continue
+                    if ext in ['jpg', 'jpeg', 'png', 'webp', 'mhtml', 'gif']:
+                        continue
+                    if any(img in vcodec for img in ['jpeg', 'mjpeg', 'jpg', 'webp', 'images']):
+                        continue
+                    if vcodec in ['none', 'null', '']:
+                        continue
+                    
+                    has_audio = acodec not in ['none', 'null', ''] and acodec is not None
+                    height = f.get('height', 0) or 0
+                    
+                    valid_videos.append({
+                        'url': u,
+                        'height': height,
+                        'has_audio': has_audio,
+                        'ext': ext
+                    })
                 
-                # استبعاد الصور المصغرة والـ storyboards
-                if f_id.startswith('sb') or 'storyboard' in f_id:
-                    continue
-                # استبعاد الصيغ التي لا تحتوي على فيديو
-                if vcodec in ['none', 'null', '']:
-                    continue
-                if f_url:
-                    download_url = f_url
-                    # تفضيل صيغ MP4 المباشرة
-                    if 'mp4' in str(f.get('ext', '')):
-                        break
+                if valid_videos:
+                    # الترتيب بحيث يتم اختيار أعلى دقة متوفرة مع صوت واضح
+                    valid_videos.sort(key=lambda x: (x['has_audio'], x['height']), reverse=True)
+                    download_url = valid_videos[0]['url']
 
-            # إذا لم يتم العثور عليه، نأخذ الرابط الأساسي
             if not download_url:
                 download_url = info.get('url')
 
@@ -113,7 +141,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.5'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.7'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
