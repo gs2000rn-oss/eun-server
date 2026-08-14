@@ -28,11 +28,12 @@ def setup_cookies():
     return None
 
 def extract_clean_url(info, mode):
-    """استخراج رابط فيديو حقيقي وصالح 100% مع منع إرجاع الصور أو الثامبنيل نهائياً"""
+    """استخراج أفضل رابط مباشر وصالح للتحميل مع استبعاد m3u8"""
+    main_url = info.get('url')
     formats = info.get('formats', [])
     
     if not formats:
-        return None
+        return main_url
 
     valid_formats = []
     for f in formats:
@@ -40,64 +41,51 @@ def extract_clean_url(info, mode):
         if not u:
             continue
             
-        format_id = str(f.get('format_id', '')).lower()
-        format_note = str(f.get('format_note', '')).lower()
-        protocol = str(f.get('protocol', '')).lower()
-        ext = str(f.get('ext', '')).lower()
-        vcodec = str(f.get('vcodec', 'none')).lower()
-        acodec = str(f.get('acodec', 'none')).lower()
-        
-        # استبعاد تام للصور، الـ storyboards، الـ thumbnails، و m3u8
-        if format_id.startswith('sb') or 'storyboard' in format_id or 'storyboard' in format_note:
-            continue
+        protocol = f.get('protocol', '')
+        # استبعاد روابط m3u8 المخصصة للبث المباشر
         if '.m3u8' in u or 'm3u8' in protocol or 'manifest' in u:
             continue
-        if ext in ['jpg', 'jpeg', 'png', 'webp', 'mhtml', 'gif', 'heic']:
-            continue
-        if any(img_codec in vcodec for img_codec in ['mjpeg', 'webp', 'jpeg', 'jpg', 'png', 'image']):
-            continue
-        # إذا كان الفيديو والصوت معاً معدومين، فهذا يعني أنه ملف صورة وليس وسائط
-        if vcodec in ['none', 'null', ''] and acodec in ['none', 'null', '']:
-            continue
-
-        has_v = vcodec not in ['none', 'null', '']
-        has_a = acodec not in ['none', 'null', '']
+            
+        vcodec = f.get('vcodec', 'none')
+        acodec = f.get('acodec', 'none')
         height = f.get('height', 0) or 0
         abr = f.get('abr', 0) or 0
         
         valid_formats.append({
             'url': u,
-            'has_v': has_v,
-            'has_a': has_a,
+            'has_v': vcodec != 'none',
+            'has_a': acodec != 'none',
             'height': height,
-            'abr': abr,
-            'ext': ext
+            'abr': abr
         })
 
     if mode == 'audio':
+        # 1. البحث عن صوت فقط
         audio_only = [f for f in valid_formats if f['has_a'] and not f['has_v']]
         if audio_only:
             audio_only.sort(key=lambda x: x['abr'], reverse=True)
             return audio_only[0]['url']
+        # 2. أي مسار يحتوي على صوت
         any_audio = [f for f in valid_formats if f['has_a']]
         if any_audio:
-            any_audio.sort(key=lambda x: x['abr'], reverse=True)
             return any_audio[0]['url']
     else:
-        # البحث عن فيديو مدمج بصوت وصورة
+        # 1. البحث عن فيديو مدمج بصوت وصورة (Progressive MP4)
         combo = [f for f in valid_formats if f['has_v'] and f['has_a']]
         if combo:
-            combo.sort(key=lambda x: (x['ext'] == 'mp4', x['height']), reverse=True)
+            combo.sort(key=lambda x: x['height'], reverse=True)
             return combo[0]['url']
             
-        # البحث عن أي فيديو صالح
+        # 2. البحث عن أي فيديو صالح
         video_only = [f for f in valid_formats if f['has_v']]
         if video_only:
             video_only.sort(key=lambda x: x['height'], reverse=True)
             return video_only[0]['url']
 
-    # منع إرجاع info.get('url') نهائياً لأنه غالباً يكون رابط الصورة/الثامبنيل
-    return valid_formats[0]['url'] if valid_formats else None
+    if main_url and '.m3u8' not in main_url:
+        return main_url
+
+    return valid_formats[0]['url'] if valid_formats else main_url
 
 @app.route('/download', methods=['GET'])
 def get_download_link():
@@ -123,6 +111,7 @@ def get_download_link():
         'no_warnings': True,
         'noplaylist': True,
         'extract_flat': False,
+        # هذا الخيار يمنع خطأ 'Requested format is not available' كلياً
         'format': 'all',
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -156,7 +145,7 @@ def get_download_link():
                     'title': title
                 })
             else:
-                return jsonify({'status': 'error', 'message': 'No valid playable video link found'}), 500
+                return jsonify({'status': 'error', 'message': 'No valid playable link found'}), 500
 
     except Exception as e:
         logger.error(f"Extraction error: {str(e)}")
@@ -164,7 +153,7 @@ def get_download_link():
 
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '4.8'})
+    return jsonify({'status': 'online', 'service': 'Shark Engine', 'version': '3.7'})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
