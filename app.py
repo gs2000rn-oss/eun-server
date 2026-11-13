@@ -9,6 +9,11 @@ app = Flask(__name__)
 PORTAL_URL = "http://pro.abct.shop"
 MAC_ADDRESS = "00:1A:79:00:29:C2"
 
+PROXIES = {
+    "http": "http://82.25.90.240:3128",
+    "https": "http://82.25.90.240:3128",
+}
+
 session = requests.Session()
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
@@ -21,14 +26,13 @@ session.headers.update({
 def get_stalker_token():
     urls = [
         f"{PORTAL_URL}/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
-        f"{PORTAL_URL}/stalker_portal/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
     ]
     for attempt in range(3):
         for url in urls:
             try:
-                print(f"[DEBUG] Attempt {attempt+1} Handshake: {url}")
-                r = session.get(url, timeout=25)
-                print(f"[DEBUG] Status: {r.status_code} | Body: {r.text[:150]}")
+                print(f"[DEBUG] Attempt {attempt+1} Handshake via proxy")
+                r = session.get(url, timeout=25, proxies=PROXIES)
+                print(f"[DEBUG] Status: {r.status_code}")
                 if r.status_code == 200 and r.text.strip().startswith('{'):
                     data = r.json()
                     token = data.get('js', {}).get('token')
@@ -61,7 +65,6 @@ def stream_proxy(cmd):
     if not token:
         return "Error: Authentication failed", 500
 
-    # بناء أمر create_link الصحيح
     cmd_clean = cmd
     if not cmd.startswith('ffmpeg') and not cmd.startswith('http'):
         cmd_clean = f"ffmpeg http://localhost/ch/{cmd}_"
@@ -74,10 +77,7 @@ def stream_proxy(cmd):
     }
     
     try:
-        print(f"[DEBUG] Create link: {link_url}")
-        link_resp = session.get(link_url, headers=headers, timeout=15)
-        print(f"[DEBUG] Create link status: {link_resp.status_code}")
-        
+        link_resp = session.get(link_url, headers=headers, timeout=15, proxies=PROXIES)
         if link_resp.status_code != 200:
             return f"Error: Create link failed ({link_resp.status_code})", 500
             
@@ -96,7 +96,7 @@ def stream_proxy(cmd):
 
         def generate():
             try:
-                with session.get(real_url, stream=True, timeout=20) as r:
+                with session.get(real_url, stream=True, timeout=20, proxies=PROXIES) as r:
                     r.raise_for_status()
                     for chunk in r.iter_content(chunk_size=8192):
                         if chunk:
