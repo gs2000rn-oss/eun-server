@@ -9,20 +9,31 @@ PORTAL_URL = "http://pro.abct.shop"
 MAC_ADDRESS = "00:1A:79:00:29:C2"
 
 def get_stalker_token():
-    auth_url = f"{PORTAL_URL}/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js"
+    urls = [
+        f"{PORTAL_URL}/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+        f"{PORTAL_URL}/stalker_portal/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+    ]
     headers = {
         'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
         'X-User-Agent': 'Model: MAG250; Link: WiFi',
-        'Cookie': f'mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris'
+        'Cookie': f'mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris',
+        'Accept': '*/*',
+        'Connection': 'Keep-Alive'
     }
-    try:
-        response = requests.get(auth_url, headers=headers, timeout=15)
-        data = response.json()
-        token = data.get('js', {}).get('token')
-        return token
-    except Exception as e:
-        print(f"[!] Error getting token: {e}")
-        return None
+    for url in urls:
+        try:
+            print(f"[DEBUG] Handshake: {url}")
+            r = requests.get(url, headers=headers, timeout=20)
+            print(f"[DEBUG] Status: {r.status_code} | Text: {r.text[:200]}")
+            if r.status_code == 200 and r.text.strip().startswith('{'):
+                data = r.json()
+                token = data.get('js', {}).get('token')
+                if token:
+                    print(f"[DEBUG] Token OK: {token}")
+                    return token
+        except Exception as e:
+            print(f"[!] Handshake failed: {e}")
+    return None
 
 @app.route('/')
 def home():
@@ -64,6 +75,8 @@ def stream_proxy(cmd):
         if real_stream_url.startswith('ffmpeg '):
             real_stream_url = real_stream_url.replace('ffmpeg ', '')
 
+        print(f"[+] Real Stream URL: {real_stream_url}")
+
         def generate():
             try:
                 with requests.get(real_stream_url, stream=True, timeout=15) as r:
@@ -77,6 +90,7 @@ def stream_proxy(cmd):
         return Response(generate(), mimetype='video/mp2t')
 
     except Exception as e:
+        print(f"[!] Error: {e}")
         return f"Error: {str(e)}", 500
 
 if __name__ == '__main__':
