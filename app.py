@@ -1,5 +1,4 @@
 import os
-import json
 import requests
 from flask import Flask, Response, jsonify
 
@@ -11,7 +10,7 @@ PASS = "0998a344f2"
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 })
 
 @app.route("/")
@@ -21,12 +20,12 @@ def home():
 @app.route("/channels")
 def channels():
     try:
-        # جلب التصنيفات
-        cats = session.get(f"{BASE}/player_api.php?username={USER}&password={PASS}&action=get_live_categories", timeout=20).json()
+        cats_url = f"{BASE}/player_api.php?username={USER}&password={PASS}&action=get_live_categories"
+        cats = session.get(cats_url, timeout=20).json()
         cat_map = {str(c.get("category_id")): c.get("category_name", "Other") for c in cats}
 
-        # جلب القنوات
-        streams = session.get(f"{BASE}/player_api.php?username={USER}&password={PASS}&action=get_live_streams", timeout=30).json()
+        streams_url = f"{BASE}/player_api.php?username={USER}&password={PASS}&action=get_live_streams"
+        streams = session.get(streams_url, timeout=30).json()
         
         result = []
         for s in streams:
