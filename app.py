@@ -8,24 +8,44 @@ PORTAL_URL = "http://pro.abct.shop"
 MAC_ADDRESS = "00:1A:79:00:29:C2"
 
 def get_stalker_token():
-    auth_url = f"{PORTAL_URL}/stalker_portal/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js"
+    # جرب مسارات متعددة للـ handshake
+    urls = [
+        f"{PORTAL_URL}/stalker_portal/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+        f"{PORTAL_URL}/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+        f"{PORTAL_URL}/c/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+    ]
+    
     headers = {
         'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
         'X-User-Agent': 'Model: MAG250; Link: WiFi',
-        'Cookie': f'mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris'
+        'Cookie': f'mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris',
+        'Accept': '*/*'
     }
-    try:
-        print(f"[DEBUG] Handshake URL: {auth_url}")
-        response = requests.get(auth_url, headers=headers, timeout=15)
-        print(f"[DEBUG] Status: {response.status_code}")
-        print(f"[DEBUG] Response: {response.text[:500]}")
-        data = response.json()
-        token = data.get('js', {}).get('token')
-        print(f"[DEBUG] Token: {token}")
-        return token
-    except Exception as e:
-        print(f"[!] Error getting token: {e}")
-        return None
+    
+    for auth_url in urls:
+        try:
+            print(f"[DEBUG] Trying: {auth_url}")
+            response = requests.get(auth_url, headers=headers, timeout=15, allow_redirects=True)
+            print(f"[DEBUG] Status: {response.status_code}")
+            text = response.text.strip()
+            print(f"[DEBUG] Response start: {text[:200]}")
+            
+            if not text:
+                continue
+                
+            # محاولة تحليل JSON
+            if text.startswith('{') or text.startswith('['):
+                data = response.json()
+                token = data.get('js', {}).get('token')
+                if token:
+                    print(f"[DEBUG] Success! Token: {token}")
+                    return token
+        except Exception as e:
+            print(f"[!] Failed on {auth_url}: {e}")
+            continue
+    
+    print("[!] All handshake attempts failed")
+    return None
 
 @app.route('/')
 def home():
