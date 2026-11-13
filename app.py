@@ -23,8 +23,10 @@ def get_stalker_token():
     }
     for url in urls:
         try:
-            print(f"[DEBUG] Handshake: {url}")
+            print(f"[DEBUG] Handshake URL: {url}")
             r = requests.get(url, headers=headers, timeout=20)
+            print(f"[DEBUG] Handshake Status: {r.status_code} | Response: {r.text[:300]}")
+            
             if r.status_code == 200 and r.text.strip().startswith('{'):
                 data = r.json()
                 token = data.get('js', {}).get('token')
@@ -32,7 +34,7 @@ def get_stalker_token():
                     print(f"[DEBUG] Token OK: {token}")
                     return token
         except Exception as e:
-            print(f"[!] Handshake failed: {e}")
+            print(f"[!] Handshake failed with exception: {e}")
     return None
 
 @app.route('/')
@@ -54,9 +56,8 @@ def stream_proxy(cmd):
     
     token = get_stalker_token()
     if not token:
-        return "Error: Could not authenticate", 500
+        return "Error: Could not authenticate (Check Render logs for handshake response)", 500
 
-    # دعم ترميز الأمر بشكل صحيح لتجنب خطأ 403
     encoded_cmd = quote(cmd, safe='')
     
     link_urls = [
