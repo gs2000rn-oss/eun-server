@@ -1,108 +1,119 @@
 import os
 import json
 import requests
-import time
-from flask import Flask, Response, jsonify
+from flask import Flask, Response, request, jsonify
+from urllib.parse import quote
 
 app = Flask(__name__)
 
 PORTAL_URL = "http://pro.abct.shop"
 MAC_ADDRESS = "00:1A:79:00:29:C2"
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 4 rev: 2721 Mobile Safari/533.3",
-    "X-User-Agent": "Model: MAG254; Link: Ethernet",
-    "Accept": "*/*",
-    "Connection": "Keep-Alive",
-    "Cookie": f"mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris"
-})
-
-def get_token():
-    url = f"{PORTAL_URL}/server/load.php?type=stb&action=handshake&token=&JsHttpRequest=1-xml"
-    for i in range(3):
+def get_stalker_token():
+    urls = [
+        f"{PORTAL_URL}/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+        f"{PORTAL_URL}/stalker_portal/server/load.php?type=stb&action=handshake&mac={MAC_ADDRESS}&version=js",
+    ]
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+        'X-User-Agent': 'Model: MAG250; Link: WiFi',
+        'Cookie': f'mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris',
+        'Accept': '*/*',
+        'Connection': 'Keep-Alive'
+    }
+    for url in urls:
         try:
-            print(f"[DEBUG] Handshake attempt {i+1}: {url}")
-            r = session.get(url, timeout=20)
-            print(f"[DEBUG] Status: {r.status_code}")
-            print(f"[DEBUG] Body: {r.text[:300]}")
-            if r.status_code == 200 and r.text.strip().startswith("{"):
+            print(f"[DEBUG] Handshake: {url}")
+            r = requests.get(url, headers=headers, timeout=20)
+            if r.status_code == 200 and r.text.strip().startswith('{'):
                 data = r.json()
-                token = data.get("js", {}).get("token")
+                token = data.get('js', {}).get('token')
                 if token:
                     print(f"[DEBUG] Token OK: {token}")
                     return token
         except Exception as e:
-            print(f"[!] Handshake error: {e}")
-        time.sleep(1)
+            print(f"[!] Handshake failed: {e}")
     return None
 
-@app.route("/")
+@app.route('/')
 def home():
     return f"MAC Restream Proxy for {MAC_ADDRESS} is Active and Running Successfully!"
 
-@app.route("/channels")
-def channels():
+@app.route('/channels')
+def get_channels():
     try:
-        with open("channels.json", "r", encoding="utf-8") as f:
-            return jsonify(json.load(f))
+        with open('channels.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify(data)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/stream/<path:cmd>")
-def stream(cmd):
-    print(f"[+] Requested channel: {cmd}")
-    token = get_token()
+@app.route('/stream/<path:cmd>')
+def stream_proxy(cmd):
+    print(f"[+] User requested: {cmd}")
+    
+    token = get_stalker_token()
     if not token:
-        return "Authentication failed", 500
+        return "Error: Could not authenticate", 500
 
-    # نفس طريقة التطبيق الأصلي
-    full_cmd = f"ffmpeg http://localhost/ch/{cmd}_"
-    encoded_cmd = requests.utils.quote(full_cmd)
-    link_url = f"{PORTAL_URL}/server/load.php?type=itv&action=create_link&cmd={encoded_cmd}&JsHttpRequest=1-xml"
-
+    # دعم ترميز الأمر بشكل صحيح لتجنب خطأ 403
+    encoded_cmd = quote(cmd, safe='')
+    
+    link_urls = [
+        f"{PORTAL_URL}/server/load.php?type=itv&action=create_link&cmd={encoded_cmd}&mac={MAC_ADDRESS}",
+        f"{PORTAL_URL}/stalker_portal/server/load.php?type=itv&action=create_link&cmd={encoded_cmd}&mac={MAC_ADDRESS}"
+    ]
+    
     headers = {
-        "Authorization": f"Bearer {token}",
-        "Cookie": f"mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris"
+        'User-Agent': 'Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3',
+        'X-User-Agent': 'Model: MAG250; Link: WiFi',
+        'Authorization': f"Bearer {token}",
+        'Cookie': f'mac={MAC_ADDRESS}; stb_lang=en; timezone=Europe/Paris',
+        'Referer': f"{PORTAL_URL}/stalker_portal/c/"
     }
+    
+    real_stream_url = None
+    for link_url in link_urls:
+        try:
+            print(f"[DEBUG] Trying link URL: {link_url}")
+            link_response = requests.get(link_url, headers=headers, timeout=10)
+            print(f"[DEBUG] Link Response Code: {link_response.status_code} | Text: {link_response.text[:200]}")
+            
+            if link_response.status_code == 200 and link_response.text.strip().startswith('{'):
+                link_data = link_response.json()
+                js_obj = link_data.get('js')
+                if isinstance(js_obj, dict):
+                    real_stream_url = js_obj.get('cmd')
+                elif isinstance(js_obj, str):
+                    real_stream_url = js_obj
+                
+                if real_stream_url:
+                    break
+        except Exception as e:
+            print(f"[!] Error trying link URL {link_url}: {e}")
+            
+    if not real_stream_url:
+        return "Error: Could not fetch stream URL from portal (403 or Invalid response)", 404
+        
+    if real_stream_url.startswith('ffmpeg '):
+        real_stream_url = real_stream_url.replace('ffmpeg ', '').strip()
+    if real_stream_url.startswith('auto '):
+        real_stream_url = real_stream_url.replace('auto ', '').strip()
 
-    try:
-        print(f"[DEBUG] Create link URL: {link_url}")
-        r = session.get(link_url, headers=headers, timeout=15)
-        print(f"[DEBUG] Create link status: {r.status_code}")
-        print(f"[DEBUG] Create link body: {r.text[:400]}")
+    print(f"[+] Real Stream URL: {real_stream_url}")
 
-        if r.status_code != 200:
-            return f"Create link failed ({r.status_code})", 500
+    def generate():
+        try:
+            with requests.get(real_stream_url, stream=True, timeout=15, headers={'User-Agent': 'VLC/3.0.18'}) as r:
+                r.raise_for_status()
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        yield chunk
+        except Exception as e:
+            print(f"[!] Stream error: {e}")
 
-        data = r.json()
-        real = data.get("js", {}).get("cmd", "").strip()
-        if real.startswith("ffmpeg "):
-            real = real[7:].strip()
-        if real.startswith("auto "):
-            real = real[5:].strip()
+    return Response(generate(), mimetype='video/mp2t')
 
-        if not real.startswith("http"):
-            return "Invalid stream URL", 404
-
-        print(f"[+] Final stream: {real}")
-
-        def generate():
-            try:
-                with session.get(real, stream=True, timeout=25) as resp:
-                    resp.raise_for_status()
-                    for chunk in resp.iter_content(8192):
-                        if chunk:
-                            yield chunk
-            except Exception as e:
-                print(f"[!] Stream error: {e}")
-
-        return Response(generate(), mimetype="video/mp2t")
-
-    except Exception as e:
-        print(f"[!] Error: {e}")
-        return f"Error: {e}", 500
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host='0.0.0.0', port=port)
