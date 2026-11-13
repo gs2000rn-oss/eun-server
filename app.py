@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from flask import Flask, Response, jsonify
 
@@ -8,38 +9,37 @@ BASE = "http://cf.egg-s10.xyz:80"
 USER = "f7622b9dd016"
 PASS = "0998a344f2"
 
-session = requests.Session()
-session.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-})
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "VLC/3.0.18 LibVLC/3.0.18",
+    "Lavf/60.3.100",
+    "Mozilla/5.0 (QtEmbedded; U; Linux; C) AppleWebKit/533.3 (KHTML, like Gecko) MAG200 stbapp ver: 2 rev: 250 Safari/533.3",
+    "IPTVSmartersPro",
+    "TiviMate/4.6.0",
+    "Perfect Player/1.5.8"
+]
+
+def get_session(ua=None):
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ua or USER_AGENTS[0],
+        "Accept": "*/*",
+        "Connection": "Keep-Alive"
+    })
+    return s
 
 @app.route("/")
 def home():
-    return "Xtream Proxy Active"
+    return "Xtream Proxy Active - Multi UA"
 
 @app.route("/channels")
 def channels():
     try:
-        cats_url = f"{BASE}/player_api.php?username={USER}&password={PASS}&action=get_live_categories"
-        cats = session.get(cats_url, timeout=20).json()
-        cat_map = {str(c.get("category_id")): c.get("category_name", "Other") for c in cats}
-
-        streams_url = f"{BASE}/player_api.php?username={USER}&password={PASS}&action=get_live_streams"
-        streams = session.get(streams_url, timeout=30).json()
-        
-        result = []
-        for s in streams:
-            sid = str(s.get("stream_id", ""))
-            name = s.get("name", "")
-            if not sid or not name or sid == "0":
-                continue
-            result.append({
-                "id": sid,
-                "name": name,
-                "logo": s.get("stream_icon", ""),
-                "group": cat_map.get(str(s.get("category_id", "")), "Other")
-            })
-        return jsonify(result)
+        with open("channels.json", "r", encoding="utf-8") as f:
+            return jsonify(json.load(f))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -48,17 +48,29 @@ def stream(sid):
     url = f"{BASE}/live/{USER}/{PASS}/{sid}.m3u8"
     print(f"[+] Streaming: {url}")
     
-    def generate():
+    for ua in USER_AGENTS:
         try:
-            with session.get(url, stream=True, timeout=20) as r:
-                r.raise_for_status()
-                for chunk in r.iter_content(8192):
-                    if chunk:
-                        yield chunk
+            print(f"[DEBUG] Trying UA: {ua[:50]}...")
+            session = get_session(ua)
+            r = session.get(url, stream=True, timeout=15)
+            if r.status_code == 200:
+                print(f"[+] Success with UA")
+                def generate():
+                    try:
+                        for chunk in r.iter_content(8192):
+                            if chunk:
+                                yield chunk
+                    except Exception as e:
+                        print(f"[!] Stream error: {e}")
+                return Response(generate(), mimetype="application/vnd.apple.mpegurl")
+            else:
+                print(f"[!] Status {r.status_code} with this UA")
+                r.close()
         except Exception as e:
-            print(f"[!] Error: {e}")
+            print(f"[!] Failed with UA: {e}")
+            continue
     
-    return Response(generate(), mimetype="application/vnd.apple.mpegurl")
+    return "All User-Agents failed", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
