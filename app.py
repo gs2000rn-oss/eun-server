@@ -9,8 +9,8 @@ PORTAL_URL = "http://pro.abct.shop"
 MAC_ADDRESS = "00:1A:79:00:29:C2"
 
 PROXIES = {
-    "http": "http://41.65.103.168:8080",
-    "https": "http://41.65.103.168:8080",
+    "http": "http://46.232.249.209:40001",
+    "https": "http://46.232.249.209:40001",
 }
 
 def get_stalker_token():
